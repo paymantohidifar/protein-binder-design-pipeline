@@ -1,0 +1,37 @@
+# Campaign outputs. RFdiffusion writes two trajectory PDBs per design, which
+# dominate repo size at scale -- never commit these.
+examples/
+results/
+outputs/
+*.trb
+*.sif
+
+# Model weights and the shared container cache
+.cache/
+models/
+*.pt
+*.ckpt
+*.npz
+
+# Generated visual artefacts
+*.pml
+*.pse
+
+# MMseqs2 / MSA intermediates
+*.a3m
+*.m8
+
+# Python
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Exception: a real RFdiffusion design + its .trb, committed as test fixtures so
+# the suite is self-contained after a clone (18 KB each). The rules above would
+# otherwise exclude them.
+!tests/fixtures/
+!tests/fixtures/*.pdb
+!tests/fixtures/*.trb
+
+# pixi environment (the lockfile IS committed; the solved env is not)
+.pixi/
