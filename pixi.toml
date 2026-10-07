@@ -1,0 +1,61 @@
+# Host-side environment for the binder design pipeline.
+#
+# SCOPE: this manages only the HOST tools -- the notebook, pipeline/ and the
+# test suite. It deliberately does NOT describe RFdiffusion, ProteinMPNN,
+# ESMFold, Boltz-2 or ColabFold: each of those runs in its own container with
+# its own pinned CUDA/PyTorch stack, and their pins actively conflict -- 
+# RFdiffusion needs torch 1.12/cu116 while Boltz-2 needs
+# torch 2.4/cu121. Container isolation is what makes that coexistence possible,
+# so pulling any of it in here would defeat the architecture.
+#
+# The host therefore only ever orchestrates containers and parses their output.
+#
+#   pixi run test        # test suite
+#   pixi run verify      # tests + notebook dry run, no GPU needed
+#   pixi run lab         # JupyterLab
+#   pixi run check       # is this host ready for GPU work?
+#   pixi run build-images
+#
+# scripts/bootstrap_instance.sh installs pixi and then `pixi install` from
+# pixi.lock, so a fresh Lambda host reproduces this environment exactly.
+# requirements.txt mirrors the package list for the degraded pip path that
+# bootstrap uses only if the pixi install fails.
+
+[workspace]
+name = "binder-design-pipeline"
+version = "0.1.0"
+description = "Database-free de novo protein-binder design funnel (see MANIFEST.md)"
+authors = ["Payman Tohidifar"]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.13.*"
+numpy = ">=1.24,<3"
+biopython = ">=1.81,<2"
+pyyaml = ">=6.0,<7"
+pandas = ">=2.0,<4"
+py3dmol = ">=2.0,<3"
+pytest = ">=7.4,<10"
+
+[feature.notebook.dependencies]
+jupyterlab = ">=4.0,<5"
+ipywidgets = ">=8.0,<9"
+nbformat = ">=5.9,<6"
+
+[environments]
+default = { features = ["notebook"] }
+ci = { features = [], no-default-feature = false }
+
+[tasks]
+test = { cmd = "pytest tests/ -q", description = "Run the host test suite" }
+test-verbose = { cmd = "pytest tests/ -v", description = "Test suite, per-test output" }
+notebook-dry-run = { cmd = "python scripts/dry_run_notebook.py", description = "Execute notebook cells with containers stubbed out" }
+verify = { depends-on = ["test", "notebook-dry-run"], description = "Everything checkable without a GPU" }
+lab = { cmd = "jupyter lab notebooks/01_binder_design_prototype.ipynb", description = "Open the prototype notebook" }
+check = { cmd = "bash scripts/bootstrap_instance.sh --check", description = "Report whether this host can run GPU stages" }
+bootstrap = { cmd = "bash scripts/bootstrap_instance.sh", description = "Prepare a fresh GPU instance (installs docker, toolkit, weights)" }
+build-images = { cmd = "bash docker/build_all.sh", description = "Build the five tool containers (~50 GB, GPU host only)" }
+bootstrap-all = { cmd = "bash scripts/bootstrap_instance.sh --all", description = "Full host setup: images + weight prefetch (60-90 min)" }
+prefetch = { cmd = "bash scripts/bootstrap_instance.sh --prefetch", description = "Pull ESMFold/ColabFold weights into the shared cache" }
+weights = { cmd = "bash scripts/bootstrap_instance.sh --weights-only", description = "Fetch RFdiffusion checkpoints into the shared cache" }
