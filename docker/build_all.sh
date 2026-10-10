@@ -147,7 +147,8 @@ major, minor = torch.cuda.get_device_capability()
 dev = major * 10 + minor
 print(f"OpenFold compiled kernels: {archs} | Device: sm_{dev}")
 
-# Binary compatibility check: Cubin runs on same major revision with equal or lower minor revision
+# Binary compatibility: a cubin runs on a device of the SAME major whose minor is
+# equal or HIGHER (compiled minor <= device minor). sm_80 therefore covers sm_86.
 if not any(a // 10 == major and a % 10 <= minor for a in archs):
     sys.exit(f"No compiled OpenFold kernel matches sm_{dev}")
 print("OK: OpenFold custom CUDA kernels cover this device.")'
