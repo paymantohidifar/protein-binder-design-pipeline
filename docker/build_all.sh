@@ -31,15 +31,16 @@ log_warn()  { printf '\033[1;33m-- warning: %s\033[0m\n' "$*"; }
 log_fatal() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 
 # -----------------------------------------------------------------------------
-# Pre-Flight Checks
+# Pre-Flight Checks & Privileged Group Self-Elevation
 # -----------------------------------------------------------------------------
-
-# Check if the current shell has docker group privileges active
-if ! id -nG "$USER" | grep -qw docker || ! groups | grep -qw docker; then
-    echo "Adding $USER to the docker group..."
-    sudo usermod -aG docker "$USER"
+# If the current process lacks active docker group privileges, add user and re-exec.
+if ! groups | grep -qw docker; then
+    if ! id -nG "$USER" | grep -qw docker; then
+        log_info "Adding $USER to the docker group..."
+        sudo usermod -aG docker "$USER"
+    fi
     
-    echo "Re-executing script with docker group privileges..."
+    log_info "Re-executing script with active docker group privileges..."
     exec sg docker -c "$0 $*"
 fi
 
