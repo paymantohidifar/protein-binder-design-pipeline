@@ -33,6 +33,11 @@ log_fatal() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 # -----------------------------------------------------------------------------
 # Pre-Flight Checks
 # -----------------------------------------------------------------------------
+
+# Adding a user to the docker group grants privileges equivalent to root access on the host system.
+sudo usermod -aG docker $USER
+newgrp docker
+
 command -v docker >/dev/null 2>&1 || log_fatal "Docker executable not found on PATH."
 
 # Storage Pre-flight: Inspect available disk space on the Docker storage partition (~80 GB recommended)
