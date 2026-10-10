@@ -34,9 +34,14 @@ log_fatal() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 # Pre-Flight Checks
 # -----------------------------------------------------------------------------
 
-# Adding a user to the docker group grants privileges equivalent to root access on the host system.
-sudo usermod -aG docker $USER
-newgrp docker
+# Check if the current shell has docker group privileges active
+if ! id -nG "$USER" | grep -qw docker || ! groups | grep -qw docker; then
+    echo "Adding $USER to the docker group..."
+    sudo usermod -aG docker "$USER"
+    
+    echo "Re-executing script with docker group privileges..."
+    exec sg docker -c "$0 $*"
+fi
 
 command -v docker >/dev/null 2>&1 || log_fatal "Docker executable not found on PATH."
 
