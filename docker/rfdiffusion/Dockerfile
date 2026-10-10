@@ -1,61 +1,56 @@
-# RFdiffusion -- SE(3)-equivariant backbone diffusion
+# ==============================================================================
+# PIPELINE COMPONENT: RFdiffusion
+# ==============================================================================
+# Role: $SE(3)$-equivariant backbone diffusion for de novo protein design.
 #
-# Upstream reference:
-#   https://github.com/RosettaCommons/RFdiffusion/blob/main/docker/Dockerfile
+# Upstream Reference: https://github.com/RosettaCommons/RFdiffusion
 #
-# Package set and pins are taken verbatim from the upstream Dockerfile and from
-# env/SE3Transformer/requirements.txt.
+# THREE LOAD-BEARING PIPELINE ADAPTATIONS FROM UPSTREAM:
+# 1. Self-Contained Build: Clones a pinned git commit hash rather than using
+#    `COPY . /app/RFdiffusion/`. This allows `docker build docker/rfdiffusion`
+#    to run self-contained without requiring the entire repository in the context.
+# 2. Host Storage Mounting: Defines `WORKDIR /work` and `VOLUME /cache` to align
+#    with `pipeline/docker.py`, ensuring large weights (~10 GB) and output files
+#    live entirely on host `/home` storage rather than root.
+# 3. Interpreter Symlink: Creates a `/usr/bin/python` symlink so probing scripts
+#    (e.g., GPU compute capability checks) can invoke `python` directly.
 #
-# Three deliberate differences from upstream, each load-bearing for this
-# pipeline:
-#
-#   1. Clones a pinned commit instead of `COPY . /app/RFdiffusion/`. Upstream's
-#      form requires the build context to be a checkout of the repo
-#      (`docker build -f docker/Dockerfile .`). Cloning makes
-#      `docker build docker/rfdiffusion` self-contained, which is how
-#      docker/build_all.sh invokes it, and the SHA makes the image
-#      reproducible.
-#   2. WORKDIR /work and VOLUME /cache, matching how pipeline/docker.py mounts
-#      the repo and the shared weight cache.
-#   3. A `python` symlink, so `docker run --entrypoint python` works for the
-#      sm_ compatibility probe without hardcoding `python3.9`.
-#
-# CUDA 11.6 / PyTorch 1.12 are upstream's pins. this image emits no sm_90 kernels and
-# therefore CANNOT run on an H100 or newer. A10 (sm_86) and A100 (sm_80) work.
-#
-# Weights stay on the host cache volume rather than in the image: the full
-# checkpoint set is ~10 GB and outlives any rebuild. Callers pass the location
-# through hydra, e.g. inference.model_directory_path=/cache/rfdiffusion/models
-# or a single checkpoint via inference.ckpt_override_path.
-#
+# HARDWARE CONSTRAINTS & WEIGHT STORAGE:
+# - Hardware Pin: Built on CUDA 11.6 / PyTorch 1.12. Emits no `sm_90` kernels.
+#   Runs on A10 (`sm_86`) and A100 (`sm_80`), but CANNOT run on H100 or newer.
+# - Weight Caching: Model checkpoints reside on the host `/cache` volume and are
+#   passed at runtime via Hydra flags (e.g., `inference.model_directory_path=/cache/rfdiffusion/models`).
+
 # ==============================================================================
 # BASE IMAGE & GPU RUNTIME
 # ==============================================================================
-# Uses NVIDIA's official enterprise runtime image (Ubuntu 20.04 + CUDA 11.6 + cuDNN 8).
-# The 'runtime' variant excludes compiler tools (like nvcc), saving ~2-3 GB of disk space.
+# Pulls NVIDIA's official enterprise runtime image (Ubuntu 20.04 + CUDA 11.6 + cuDNN 8).
+# The 'runtime' variant excludes build compilers (nvcc), saving ~2-3 GB on the root drive.
 FROM nvcr.io/nvidia/cuda:11.6.2-cudnn8-runtime-ubuntu20.04
 
 # ==============================================================================
 # BUILD ARGUMENTS & ENVIRONMENT VARIABLES
 # ==============================================================================
-# Pin the specific git commit hash from RosettaCommons/RFdiffusion for absolute reproducibility
+# Pin the exact upstream commit SHA from RosettaCommons/RFdiffusion for build reproducibility
 ARG RFDIFFUSION_COMMIT=b44206a2a79f219bb1a649ea50603a284c225050
 
-# DEBIAN_FRONTEND=noninteractive : Suppresses interactive prompts during apt installs
-# PYTHONUNBUFFERED=1             : Streams stdout/stderr directly to logs without buffering
-# DGLBACKEND=pytorch             : Sets Deep Graph Library backend to PyTorch
+# DEBIAN_FRONTEND=noninteractive : Suppresses interactive OS prompts during apt installs
+# PYTHONUNBUFFERED=1             : Streams stdout/stderr directly to terminal without log buffering
+# PYTHONDONTWRITEBYTECODE=1      : Prevents writing temporary .pyc bytecode files to disk
+# DGLBACKEND=pytorch             : Configures Deep Graph Library to use PyTorch as backend
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     DGLBACKEND=pytorch
 
 # ==============================================================================
 # SYSTEM PACKAGES & PYTHON ENVIRONMENT SETUP
 # ==============================================================================
 # 1. Update package list quietly (-q)
-# 2. Install minimal required packages (git, Python 3.9, pip) without extra bloat
-# 3. Upgrade pip to the latest version without caching wheels
-# 4. Create a symlink so calling 'python' invokes 'python3.9'
-# 5. Purge apt index files, autoremove, and clean to keep this layer lightweight
+# 2. Install minimal dependencies (git, Python 3.9, pip) without optional bloat
+# 3. Upgrade pip without saving wheel packages in cache
+# 4. Create symlink from /usr/bin/python3.9 -> /usr/bin/python
+# 5. Purge apt index files and autoremove to keep this Docker layer lightweight
 RUN apt-get -q update \
     && apt-get install --no-install-recommends -y \
         git \
@@ -73,7 +68,7 @@ RUN apt-get -q update \
 # Set working directory to /app
 WORKDIR /app
 
-# Clone the RFdiffusion repository and quietly check out the pinned commit
+# Clone the RFdiffusion repository and quietly check out the exact pinned commit SHA
 RUN git clone https://github.com/RosettaCommons/RFdiffusion.git \
     && cd RFdiffusion \
     && git checkout --quiet ${RFDIFFUSION_COMMIT}
@@ -81,16 +76,16 @@ RUN git clone https://github.com/RosettaCommons/RFdiffusion.git \
 # ==============================================================================
 # PYTHON DEPENDENCIES & PACKAGE INSTALLATION
 # ==============================================================================
-# Single pip invocation to install all dependencies in one Docker layer:
-# - dgl & torch: Pinned versions compiled specifically for CUDA 11.6 (+cu116)
-# - e3nn: Euclidean 3D equivariant neural network library
+# Single pip invocation to consolidate all dependencies into a single image layer:
+# - dgl & torch: Exact CUDA 11.6 (+cu116) binaries matching upstream pins
+# - e3nn: Euclidean 3D coordinate-equivariant neural network library
 # - wandb: Experiment tracking and logging
-# - pynvml: NVIDIA Management Library bindings for monitoring GPU usage
-# - dllogger: NVIDIA logging utility installed directly from GitHub (not on PyPI)
-# - decorator, hydra-core, pyrsistent: Configuration management and utilities
-# - /app/RFdiffusion/env/SE3Transformer: Bundled coordinate-equivariant module
+# - pynvml: NVIDIA Management Library Python bindings for monitoring GPU VRAM
+# - dllogger: NVIDIA utility installed directly from GitHub (not available on PyPI)
+# - decorator, hydra-core, pyrsistent: Configuration management and script utilities
+# - /app/RFdiffusion/env/SE3Transformer: Local module for coordinate-equivariant transformations
 #
-# Final command installs RFdiffusion package itself without altering installed dependencies (--no-deps)
+# Final command installs RFdiffusion itself without overriding installed dependency pins (--no-deps)
 RUN python3.9 -m pip install -q --no-cache-dir \
         dgl==1.0.2+cu116 -f https://data.dgl.ai/wheels/cu116/repo.html \
         torch==1.12.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116 \
@@ -105,13 +100,14 @@ RUN python3.9 -m pip install -q --no-cache-dir \
     && python3.9 -m pip install --no-cache-dir /app/RFdiffusion --no-deps
 
 # ==============================================================================
-# VOLUMES & EXECUTION CONFIGURATION
+# VOLUMES & WORKSPACE CONFIGURATION
 # ==============================================================================
-# Declare /cache as a mount point for external model weights (~10 GB), keeping them out of the image
+# Declare /cache as an external mount point for model checkpoints (~10 GB), preventing
+# root partition bloat and keeping weights intact across image rebuilds
 VOLUME /cache
 
-# Set /work as default workspace where host files/repos will be mounted for relative path resolution
+# Set /work as the execution workspace where host project files/inputs resolve relative paths
 WORKDIR /work
 
-# Configure default command to execute RFdiffusion's inference script upon container launch
+# Configure default container executable entrypoint to run RFdiffusion inference
 ENTRYPOINT ["python3.9", "/app/RFdiffusion/scripts/run_inference.py"]
