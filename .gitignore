@@ -35,3 +35,6 @@ __pycache__/
 
 # pixi environment (the lockfile IS committed; the solved env is not)
 .pixi/
+
+# Docker
+docker/notes.txt
