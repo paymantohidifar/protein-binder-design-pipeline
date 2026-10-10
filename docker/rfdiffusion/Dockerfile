@@ -87,6 +87,7 @@ RUN git clone https://github.com/RosettaCommons/RFdiffusion.git \
 #
 # Final command installs RFdiffusion itself without overriding installed dependency pins (--no-deps)
 RUN python3.9 -m pip install -q --no-cache-dir \
+        numpy==1.26.4 \
         dgl==1.0.2+cu116 -f https://data.dgl.ai/wheels/cu116/repo.html \
         torch==1.12.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116 \
         e3nn==0.3.3 \
