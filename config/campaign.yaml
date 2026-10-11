@@ -1,0 +1,141 @@
+# Single source of truth for the binder design campaign.
+#
+# Both the prototype notebook and the production Snakefile read this file, so
+# porting to SnakeMake is a translation of the execution graph, not a rewrite of
+# the parameters. Nothing downstream should hardcode a threshold.
+
+campaign:
+  name: insulin_receptor_binders
+  # Flip to false for the full campaign. Smoke mode shrinks the pipeline and
+  # records metrics without enforcing gates, so a plumbing bug surfaces as a
+  # NaN column rather than as an empty result set.
+  smoke_test: true
+
+target:
+  pdb: inputs/pdbs/insulin_target.pdb
+  chain: A
+  residue_range: [1, 150]
+  hotspots: [A59, A83, A91]
+
+# --- Step 1: RFdiffusion -----------------------------------------------------
+rfdiffusion:
+  contigs: "[A1-150/0 70-100]"
+  checkpoint: Complex_base_ckpt.pt
+  num_designs:
+    smoke: 5
+    full: 1000
+  # Noise 0 improves design quality for PPI
+  noise_scale_ca: 0
+  noise_scale_frame: 0
+  write_trajectory:
+    smoke: true
+    full: false
+  # A hotspot is defined as a target residue within 10 A Cb of the binder, 
+  # so once a binder exists the conditioning becomes checkable. A design whose 
+  # binder never reaches a requested hotspot ignored its conditioning and should 
+  # not consume Step 2+ compute, however good it looks geometrically. Also catches a 
+  # mis-specified hotspot string (wrong chain or numbering) on design 1 instead of after the
+  # whole funnel has run.
+  verify_hotspot_contacts: true
+  hotspot_contact_distance: 10.0
+  # Require all hotspots engaged. Drop to 2 to allow partial engagement.
+  min_hotspots_engaged: 3
+
+# --- Step 2: ProteinMPNN -----------------------------------------------------
+proteinmpnn:
+  seqs_per_backbone:
+    smoke: 2
+    full: 8
+  sampling_temperature: 0.1
+  # SolubleMPNN penalises surface hydrophobics; preferred for binders that must
+  # express and stay soluble.
+  use_soluble_weights: true
+  expected_binder_chain: B
+  expected_target_chain: A
+  design_chains: [B]
+  fixed_chains: [A]
+
+# --- Step 3: Monomer self-consistency ---------------------------------------
+# Thresholds roughly match Bennett et al. 2023. 
+gates:
+  step3a_esmfold:
+    plddt_min: 80.0
+    scrmsd_max: 2.0        # was 1.5
+    expected_pass_rate: [0.15, 0.20]
+  step3b_boltz2:
+    plddt_min: 85.0
+    scrmsd_max: 1.5        # was 1.2
+    expected_pass_rate: [0.05, 0.10]
+  step4_complex:
+    # Primary discriminator. Less saturating than ipTM on de novo binders.
+    pae_interaction_max: 10.0
+    iptm_min: 0.70         # was 0.80, demoted to secondary
+    binder_rmsd_to_design_max: 2.0
+
+# --- Step 4: Complex validation ---------------------------------------------
+step4:
+  # Both engines run so their outputs can be compared, per MANIFEST Section 5.
+  engines: [boltz2, colabfold]
+  # single_sequence is the genuinely database-free path. MSA mode sends target
+  # sequences to a public third-party server -- opt in deliberately.
+  boltz2_msa_mode: single_sequence
+  colabfold_msa_mode: mmseqs2_api
+  colabfold_model_type: alphafold2_multimer_v3
+  # Run colabfold_batch twice, as upstream's README recommends: once with
+  # --msa-only to fetch MSAs, then again to predict. Three reasons it is worth
+  # it here, beyond upstream's GPU-utilisation argument:
+  #   1. The MSA pass is network-bound on a RATE-LIMITED public API. The GPU
+  #      would otherwise idle while queueing -- costly at Phase B scale.
+  #   2. The MSA pass needs no GPU and no AF2 weights (--msa-only sets
+  #      num_models=0, which skips download_alphafold_params), so it runs with
+  #      gpus=False and does not hold an A100 to wait on HTTP.
+  # Both passes MUST share one out_dir: the MSA cache is <out_dir>/<job>.pickle.
+  # Set false to run the single combined invocation.
+  colabfold_two_step: true
+  # DEFERRED -- see MANIFEST Section 5b. Adds --calc-extra-ptm, which writes
+  # actifptm / pairwise_actifptm / pairwise_iptm / per_chain_ptm into each
+  # scores JSON. actifPTM is an interface-restricted pTM (8 A Cb contacts
+  # only), so it should be less diluted by the 150-residue target than
+  # whole-complex ipTM. Not enabled: upstream marks it Experimental, there is
+  # no published threshold to replace ipTM > 0.70, and Boltz-2 has no
+  # equivalent. Turning this on is observational only -- it must not gate
+  # anything until calibrated against the Step 4 controls.
+
+# --- Controls ----------------------------------------------------------------
+controls:
+  enabled: true
+  # Length-matched scramble of a passing design. Must score clearly worse on
+  # pae_interaction than real designs, or the metric is wrong.
+  negative_scramble: true
+
+# --- Paths -------------------------------------------------------------------
+paths:
+  cache: ${BINDER_CACHE:-~/.cache/binder-pipeline}
+  outputs: results
+  backbones: results/01_backbones
+  sequences: results/02_sequences
+  esmfold: results/03a_esmfold
+  boltz2_monomer: results/03b_boltz2
+  complexes: results/04_complexes
+  summary: results/final_leads_summary.csv
+
+# --- Containers --------------------------------------------------------------
+containers:
+  rfdiffusion:
+    image: binder-rfdiffusion:latest
+    upstream: https://github.com/RosettaCommons/RFdiffusion
+    commit: null
+  proteinmpnn:
+    image: binder-proteinmpnn:latest
+    upstream: https://github.com/dauparas/ProteinMPNN
+    commit: null
+  esmfold:
+    image: binder-esmfold:latest
+    model: esm2_t36_3B_UR50D
+  boltz2:
+    image: binder-boltz2:latest
+    pip_version: null
+  colabfold:
+    image: binder-colabfold:latest
+    version: 1.6.2
+    base_image: ghcr.io/sokrypton/colabfold:1.6.2-cuda12
