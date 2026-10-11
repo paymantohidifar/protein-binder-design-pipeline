@@ -3,10 +3,8 @@
 # SCOPE: this manages only the HOST tools -- the notebook, pipeline/ and the
 # test suite. It deliberately does NOT describe RFdiffusion, ProteinMPNN,
 # ESMFold, Boltz-2 or ColabFold: each of those runs in its own container with
-# its own pinned CUDA/PyTorch stack, and their pins actively conflict -- 
-# RFdiffusion needs torch 1.12/cu116 while Boltz-2 needs
-# torch 2.4/cu121. Container isolation is what makes that coexistence possible,
-# so pulling any of it in here would defeat the architecture.
+# its own pinned CUDA/PyTorch stack, and their pins actively conflict. Container 
+# isolation is what makes that coexistence possible.
 #
 # The host therefore only ever orchestrates containers and parses their output.
 #
@@ -24,7 +22,7 @@
 [workspace]
 name = "binder-design-pipeline"
 version = "0.1.0"
-description = "Database-free de novo protein-binder design funnel (see MANIFEST.md)"
+description = "Database-free de novo protein-binder design funnel"
 authors = ["Payman Tohidifar"]
 channels = ["conda-forge"]
 platforms = ["linux-64"]
