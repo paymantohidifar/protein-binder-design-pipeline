@@ -50,10 +50,10 @@ proteinmpnn:
   # SolubleMPNN penalises surface hydrophobics; preferred for binders that must
   # express and stay soluble.
   use_soluble_weights: true
-  expected_binder_chain: B
-  expected_target_chain: A
-  design_chains: [B]
-  fixed_chains: [A]
+  expected_binder_chain: A
+  expected_target_chain: B
+  design_chains: [A]
+  fixed_chains: [B]
 
 # --- Step 3: Monomer self-consistency ---------------------------------------
 # Thresholds roughly match Bennett et al. 2023. 
