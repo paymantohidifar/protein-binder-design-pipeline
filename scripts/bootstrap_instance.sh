@@ -4,7 +4,7 @@
 #
 # Prepares a fresh GPU host by validating environment prerequisites, setting up
 # Docker with GPU passthrough, creating shared weight caches, materializing 
-# host Python environments, and prefetching model parameters.
+# host Python environments (managed by Pixi), and prefetching model parameters.
 #
 # Usage:
 #   bash scripts/bootstrap_instance.sh                 # Standard host setup (~2 min)
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
         --images)       DO_IMAGES=true ;;
         --prefetch)     DO_PREFETCH=true ;;
         --all)          DO_IMAGES=true; DO_PREFETCH=true ;;
-        -h|--help)      sed -n '2,25p' "$0"; exit 0 ;;
+        -h|--help)      sed -n '2,16p' "$0"; exit 0 ;;
         *)              printf 'Error: Unknown option %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
