@@ -40,12 +40,14 @@ pytest = ">=7.4,<10"
 jupyterlab = ">=4.0,<5"
 ipywidgets = ">=8.0,<9"
 nbformat = ">=5.9,<6"
+ipykernel = ">=6.0,<8"
 
 [environments]
 default = { features = ["notebook"] }
 ci = { features = [], no-default-feature = false }
 
 [tasks]
+register-kernel = "python -m ipykernel install --user --name default --display-name 'Python (Pixi: default)'"
 test = { cmd = "pytest tests/ -q", description = "Run the host test suite" }
 test-verbose = { cmd = "pytest tests/ -v", description = "Test suite, per-test output" }
 notebook-dry-run = { cmd = "python scripts/dry_run_notebook.py", description = "Execute notebook cells with containers stubbed out" }
