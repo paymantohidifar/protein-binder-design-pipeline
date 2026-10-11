@@ -303,7 +303,7 @@ def _select_reference_family(
 def design_file_order(design_pdb: str | Path) -> list[ResidueKey]:
     """(chain, resnum) per residue in PDB file order.
 
-    Position i corresponds to .trb index i.
+    Position i corresponds to .trb index i
     """
     struct = pdb_io.read_pdb(design_pdb)
     return [
@@ -314,17 +314,8 @@ def design_file_order(design_pdb: str | Path) -> list[ResidueKey]:
 
 
 def classify_chains(trb: TrbInfo, design_pdb: str | Path) -> ChainRoles:
-    """Decide which chain is binder and which is target, from the .trb.
-
-    The target is the chain made of reference-derived residues; the binder is
-    the chain made of diffused residues. Reported rather than assumed, because
-    chain order follows contig order: `[A1-150/0 70-100]` lists the target
-    first, so the target is chain A and the binder chain B -- the opposite of
-    what a 'binder is chain A' convention would suggest.
-
-    Motif scaffolding puts both in one chain. That is not a binder design, and
-    this returns is_binder_design=False rather than inventing a split.
-    """
+    """Decide which chain is binder and which is target, from the .trb."""
+    
     order = design_file_order(design_pdb)
     if len(order) != trb.design_length:
         raise TrbError(
