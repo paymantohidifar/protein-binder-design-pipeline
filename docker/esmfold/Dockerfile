@@ -81,7 +81,7 @@ RUN pip install --no-cache-dir \
         einops \
         ml-collections \
         dm-tree \
-        pytorch-lightning \
+        "pytorch-lightning>=1.8.0,<2.0.0" \
         biopython==1.81 \
         scipy \
         "numpy==1.26.4"
