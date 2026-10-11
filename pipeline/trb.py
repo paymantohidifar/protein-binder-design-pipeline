@@ -1,23 +1,15 @@
-"""RFdiffusion .trb metadata -- the authoritative description of a design.
+"""RFdiffusion `.trb` (Trace/Trajectory) Metadata File Parameter Reference
 
-Every design PDB ships a .trb pickle beside it. Rather than infer which output
-residues are target and which are de novo binder, which chain is which, or what
-hotspots were requested, read what RFdiffusion recorded.
+The `.trb` file is a binary Python pickle dictionary output alongside each generated 
+PDB file during an RFdiffusion trajectory. It contains run configurations, model confidence 
+scores, structural/sequence inpainting masks, and index conversion arrays between 
+the input target PDB, tensor space (0-indexed), and output PDB structures.
 
-Verified against outputs/motifscaffolding_0.{trb,pdb} in this repo:
-
-  con_hal_idx0     0-based indices into the DESIGN, in PDB file order
-  con_hal_pdb_idx  (chain, resnum) of those positions in the design
-  con_ref_pdb_idx  (chain, resnum) of the SAME positions in the input PDB
-  mask_1d          bool[L]; True exactly where con_hal_idx0 points
-  plddt            float[T, L], RFdiffusion's own per-timestep pLDDT on 0-1
-  config           the full hydra config, including ppi.hotspot_res
-
-The con_ref -> con_hal pairing matters more than it looks: RFdiffusion
-RENUMBERS. In the sample run, input A163-181 became design A30-48. Any residue
-selection expressed in input numbering -- hotspots above all -- must be mapped
-through this correspondence before it is applied to a design PDB, or it silently
-addresses the wrong residues.
+Nomenclature & Indexing Conventions:
+  - `ref`: Reference / Input Target structure.
+  - `hal`: Hallucinated / Generated Output structure.
+  - `pdb_idx`: PDB-formatted residue identifiers, e.g., ('A', 34) or 'A34'.
+  - `idx0`: Zero-based continuous integer indices (0, 1, ..., N-1) for PyTorch tensors.
 """
 
 from __future__ import annotations
@@ -31,7 +23,120 @@ import numpy as np
 from . import metrics, pdb_io
 from .pdb_io import parse_label  # re-exported: trb.parse_label
 
+TRB_PARAMETER_DEFINITIONS = {
+
+    # RUNTIME & MODEL CONFIDENCE METRICS
+    "config": {
+        "type": "dict / Hydra DictConfig",
+        "description": "Resolved runtime configuration flags (contig specifications, hotspots, model checkpoints, noise scales).",
+        "developer_note": "Used for provenance tracking, logging, and audit trails."
+    },
+    "plddt": {
+        "type": "numpy.ndarray / torch.Tensor (2D Float)",
+        "description": "Per-timestep, per-residue pLDDT confidence from RFdiffusion. Shape (timesteps, residues) -- measured (50, 237) on results/01_backbones/design_0.trb -- on a 0-1 scale, NOT 0-100.",
+        "developer_note": "Use TrbInfo.final_plddt(), which takes the LAST timestep and rescales to 0-100. np.mean(trb['plddt']) is wrong twice over: it averages across all 50 diffusion steps, and it returns ~0.998, so a `>= 80` test rejects every good design."
+    },
+    "device": {
+        "type": "str",
+        "description": "Compute device hardware string used during inference (e.g., 'cuda:0' or 'cpu').",
+        "developer_note": "Debugging hardware allocation across multi-GPU clusters."
+    },
+    "time": {
+        "type": "float",
+        "description": "Total wall-clock time in seconds taken to complete the reverse diffusion trajectory.",
+        "developer_note": "Useful for benchmarking compute overhead per design."
+    },
+
+    # CONTIG & RESIDUE MAPPING ARRAYS (GENERAL / MONOMER)
+    "con_ref_pdb_idx": {
+        "type": "list of tuples / str",
+        "description": "PDB chain ID and residue number tuples of reference/motif residues held fixed from the input PDB.",
+        "example": "[('A', 34), ('A', 35), ...]"
+    },
+    "con_hal_pdb_idx": {
+        "type": "list of tuples / str",
+        "description": "PDB chain ID and residue number assigned to the corresponding reference/motif residues in the output PDB.",
+        "example": "[('A', 12), ('A', 13), ...]"
+    },
+    "con_ref_idx0": {
+        "type": "numpy.ndarray (1D Int)",
+        "description": "Zero-based tensor indices of reference/motif residues within the input target structure arrays.",
+        "example": "array([33, 34, 35])"
+    },
+    "con_hal_idx0": {
+        "type": "numpy.ndarray (1D Int)",
+        "description": "Zero-based tensor indices showing where reference/motif residues land in the output design tensor.",
+        "example": "array([11, 12, 13])",
+        "developer_note": "POPULATED ONLY FOR MOTIF SCAFFOLDING. Empty in PPI/binder runs, where the fixed residues are in complex_con_hal_idx0 instead. Reading this unconditionally is the bug that blocked the campaign."
+    },
+
+    # COMPLEX & RECEPTOR/BINDER MAPPING ARRAYS (PPI / TARGET BINDER DESIGN)
+    "complex_con_ref_pdb_idx": {
+        "type": "list of tuples",
+        "description": "PDB-style chain/residue mappings for all fixed residues across the full target-binder complex."
+    },
+    "complex_con_hal_pdb_idx": {
+        "type": "list of tuples",
+        "description": "Corresponding output PDB chain/residue mappings across the full target-binder complex."
+    },
+    "complex_con_ref_idx0": {
+        "type": "numpy.ndarray (1D Int)",
+        "description": "Zero-based tensor indices for all fixed residues across the full target-binder complex."
+    },
+    "complex_con_hal_idx0": {
+        "type": "numpy.ndarray (1D Int)",
+        "description": "Zero-based tensor indices for all fixed residues in the generated complex output, in the DESIGN TENSOR frame.",
+        "developer_note": "The correct array for PPI/binder runs. Measured 87..236 on design_0 (the 150-residue target), matching mask_1d exactly."
+    },
+    "receptor_con_ref_pdb_idx": {
+        "type": "list of tuples",
+        "description": "PDB-style chain/residue mappings isolated strictly to the target/receptor protein."
+    },
+    "receptor_con_hal_pdb_idx": {
+        "type": "list of tuples",
+        "description": "Corresponding output PDB chain/residue mappings isolated strictly to the target/receptor protein."
+    },
+    "receptor_con_ref_idx0": {
+        "type": "numpy.ndarray (1D Int)",
+        "description": "Zero-based tensor indices isolated strictly to the target/receptor protein in the input."
+    },
+    "receptor_con_hal_idx0": {
+        "type": "numpy.ndarray (1D Int)",
+        "description": "Zero-based tensor indices isolated strictly to the target/receptor protein in the output, in the RECEPTOR'S OWN frame.",
+        "developer_note": "NOT a substitute for complex_con_hal_idx0. Measured 0..149 on design_0 while the target actually sits at design positions 87..236, so using it silently addresses the binder plus part of the target. Same element count, different frame -- no error, wrong answer."
+    },
+
+    # INPAINTING & STRUCTURAL MASKS
+    "inpaint_str": {
+        "type": "list of bool / int",
+        "description": "Structural Inpainting Mask. False/0 indicates backbone positions generated de novo; True/1 indicates positions structurally frozen from a template.",
+        "developer_note": "Crucial for identifying binder vs target boundaries: np.where(trb['inpaint_str']) gives de novo positions."
+    },
+    "inpaint_seq": {
+        "type": "list of bool / int",
+        "description": "Sequence Inpainting Mask. False/0 indicates residue positions allowed to be redesigned; True/1 indicates native amino acids kept fixed.",
+        "developer_note": "Used in downstream ProteinMPNN sequence generation to set redesign bias/fixed masks."
+    },
+    "sampled_mask": {
+        "type": "list of bool / int",
+        "description": "The explicit structural mask sampled by the internal contigmap module for variable-length contig specifications.",
+        "example": "Sampled length variation for 'contigs=[10-30/A50-65/20-40]'"
+    },
+    "mask_1d": {
+        "type": "numpy.ndarray / torch.Tensor (1D Bool)",
+        "description": "Master 1D binary tensor fed into the RFdiffusion neural network uniting contig lengths, fixed motifs, de novo regions, and chain breaks.",
+        "developer_note": "Internal architectural feature mask used during tensor self-attention."
+    }
+}
+
 ResidueKey = tuple[str, int]
+
+# Which key family describes the fixed (reference-derived) residues depends on
+# what RFdiffusion was asked to do, so the family cannot be hardcoded.
+_REFERENCE_FAMILIES = (
+    ("complex_con_hal_idx0", "complex_con_hal_pdb_idx", "complex_con_ref_pdb_idx"),
+    ("con_hal_idx0", "con_hal_pdb_idx", "con_ref_pdb_idx"),
+)
 
 
 class TrbError(RuntimeError):
@@ -81,8 +186,7 @@ class TrbInfo:
 
         RFdiffusion writes 0-1 (measured: final-step mean 0.97 on the sample
         run), so this goes through the same normalisation as every other
-        predictor's pLDDT. A free Step 1 quality signal -- not a gate metric,
-        since the gates are defined on ESMFold and Boltz-2.
+        predictor's pLDDT.
         """
         if self.plddt.size == 0:
             raise TrbError(f"no pLDDT recorded in {self.path}")
@@ -144,41 +248,62 @@ def read_trb(path: str | Path) -> TrbInfo:
     except (OSError, pickle.UnpicklingError) as exc:
         raise TrbError(f"cannot read {path}: {exc}") from exc
 
-    missing = [k for k in ("con_hal_idx0", "con_hal_pdb_idx", "mask_1d") if k not in raw]
-    if missing:
-        raise TrbError(f"{path} lacks {missing}; keys present: {sorted(raw)}")
+    if "mask_1d" not in raw:
+        raise TrbError(f"{path} lacks 'mask_1d'; keys present: {sorted(raw)}")
 
     design_length = len(raw["mask_1d"])
-    reference_idx0 = np.asarray(raw["con_hal_idx0"], dtype=int)
-
-    # mask_1d should mark exactly the reference-derived positions. Verified true
-    # on the sample run; if it ever diverges the file's semantics have changed
-    # and nothing downstream should be trusted.
     mask_positions = np.where(np.asarray(raw["mask_1d"], dtype=bool))[0]
-    if not np.array_equal(np.sort(reference_idx0), mask_positions):
-        raise TrbError(
-            f"{path}: mask_1d and con_hal_idx0 disagree "
-            f"({mask_positions.size} vs {reference_idx0.size} positions). "
-            "The .trb format may have changed."
-        )
+    idx_key, hal_key, ref_key = _select_reference_family(path, raw, mask_positions)
 
     return TrbInfo(
         path=path,
         design_length=design_length,
-        reference_idx0=reference_idx0,
-        reference_design_keys=[(c, int(r)) for c, r in raw["con_hal_pdb_idx"]],
-        reference_input_keys=[(c, int(r)) for c, r in raw.get("con_ref_pdb_idx", [])],
+        reference_idx0=np.asarray(raw.get(idx_key, []), dtype=int),
+        reference_design_keys=[(c, int(r)) for c, r in raw.get(hal_key, [])],
+        reference_input_keys=[(c, int(r)) for c, r in raw.get(ref_key, [])],
         sampled_mask=[str(m) for m in raw.get("sampled_mask", [])],
         plddt=np.asarray(raw.get("plddt", np.empty((0, 0))), dtype=np.float64),
         config=raw.get("config", {}),
     )
 
 
+def _select_reference_family(
+    path: Path, raw: dict, mask_positions: np.ndarray
+) -> tuple[str, str, str]:
+    """Pick the key family describing this run's fixed residues.
+
+    `mask_1d` marks exactly the reference-derived positions, so it doubles as
+    the selector: the right family is the one whose design-frame indices match
+    it. That makes the choice self-validating rather than inferred from the
+    contig string, and it is why picking the wrong family (see
+    `_REFERENCE_FAMILIES`) raises here instead of returning bad indices.
+    """
+    # A fully unconditional run fixes nothing: no reference residues, no mask.
+    # Legitimate, so it resolves to the canonical family with empty arrays.
+    if mask_positions.size == 0:
+        return _REFERENCE_FAMILIES[-1]
+
+    sizes = []
+    for family in _REFERENCE_FAMILIES:
+        idx_key = family[0]
+        idx0 = np.asarray(raw.get(idx_key, []), dtype=int)
+        sizes.append(f"{idx_key}={idx0.size}")
+        if idx0.size and np.array_equal(np.sort(idx0), mask_positions):
+            return family
+
+    raise TrbError(
+        f"{path}: no reference index family matches mask_1d "
+        f"({mask_positions.size} fixed positions; {', '.join(sizes)}). "
+        "The .trb format may have changed -- re-audit before trusting "
+        "anything downstream. Note receptor_con_hal_idx0 is NOT a valid "
+        "substitute: it is indexed in the receptor's frame, not the design's."
+    )
+
+
 def design_file_order(design_pdb: str | Path) -> list[ResidueKey]:
     """(chain, resnum) per residue in PDB file order.
 
-    Position i corresponds to .trb index i -- verified against
-    outputs/motifscaffolding_0.{pdb,trb}.
+    Position i corresponds to .trb index i.
     """
     struct = pdb_io.read_pdb(design_pdb)
     return [
