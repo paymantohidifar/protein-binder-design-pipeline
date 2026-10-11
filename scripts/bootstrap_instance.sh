@@ -119,6 +119,14 @@ done
 # ==============================================================================
 log "Docker and NVIDIA container toolkit"
 
+# If the current process lacks active docker group privileges, add user and re-exec.
+if ! groups | grep -qw docker; then
+    if ! id -nG "$USER" | grep -qw docker; then
+        log "Adding $USER to the docker group..."
+        sudo usermod -aG docker "$USER"
+    fi
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
     if [[ "$MODE" == "check" ]]; then
         note_fail "Docker is not installed."
@@ -414,7 +422,7 @@ if [[ "$FAILURES" -eq 0 ]]; then
     fi
 
     if [[ "$PIXI_READY" == true ]]; then
-        echo "   Interactive notebook command: pixi run lab (tunnel via SSH port 8888)"
+        echo "   Next step: pixi run register-kernel # (registers Jupyter kernel for Pixi environment)"
         echo "   Environment validation: pixi run verify"
     else
         echo "   Interactive notebook command: jupyter lab notebooks/01_binder_design_prototype.ipynb"
