@@ -65,6 +65,4 @@ VOLUME /cache
 WORKDIR /work
 
 # Configure default container executable entrypoint to run ProteinMPNN's runner script.
-# Any CLI flags passed to `docker run` (e.g., `--pdb_path`, `--use_soluble_model`) 
-# append directly to this execution string.
 ENTRYPOINT ["python", "/opt/ProteinMPNN/protein_mpnn_run.py"]
