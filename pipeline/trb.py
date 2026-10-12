@@ -369,6 +369,20 @@ def classify_chains(trb: TrbInfo, design_pdb: str | Path) -> ChainRoles:
     )
 
 
+def hotspots_on_design(design_pdb: str | Path) -> dict[str, str]:
+    """Hotspot labels renumbered onto one RFdiffusion design: {'A59': 'B146'}.
+
+    The target is emitted after the binder, so its residue numbers are shifted
+    by the binder length -- which is sampled per design, so the shift differs
+    between designs of one run (+87, +84, +92 ... across design_0-4). Taken
+    from the .trb's own residue correspondence rather than computed from the
+    shift, so it also holds if a contig ever puts the target first.
+    """
+    info = read_trb(trb_path_for(design_pdb))
+    labels = info.hotspots or []
+    return dict(zip(labels, info.input_to_design(labels)))
+
+
 def describe(trb: TrbInfo, design_pdb: str | Path | None = None) -> str:
     """Human-readable summary for notebook checkpoints."""
     lines = [
