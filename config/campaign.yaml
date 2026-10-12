@@ -92,7 +92,7 @@ step4:
   # Both passes MUST share one out_dir: the MSA cache is <out_dir>/<job>.pickle.
   # Set false to run the single combined invocation.
   colabfold_two_step: true
-  # DEFERRED -- see MANIFEST Section 5b. Adds --calc-extra-ptm, which writes
+  # Adds --calc-extra-ptm, which writes
   # actifptm / pairwise_actifptm / pairwise_iptm / per_chain_ptm into each
   # scores JSON. actifPTM is an interface-restricted pTM (8 A Cb contacts
   # only), so it should be less diluted by the 150-residue target than
