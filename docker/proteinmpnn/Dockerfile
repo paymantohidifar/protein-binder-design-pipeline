@@ -4,19 +4,6 @@
 # Role: Fixed-backbone sequence design engine (generating amino acid sequences 
 #       conditioned on 3D backbone coordinates).
 # Upstream Reference: https://github.com/dauparas/ProteinMPNN
-#
-# PROVENANCE & WEIGHT ARCHITECTURE:
-# 1. Custom Image: Upstream provides no Dockerfile; this container is built 
-#    custom for the pipeline using PyTorch's official runtime image.
-# 2. In-Tree Checkpoints: Unlike RFdiffusion, ESMFold, or Boltz-2, ProteinMPNN's 
-#    weights (11 checkpoints = ~74 MB total: vanilla, soluble, and ca_model) ship 
-#    directly inside the cloned repository in-tree.
-# 3. Zero Bootstrap Downloads: Because weights reside directly in the codebase, 
-#    this image requires no external weight downloads at container startup.
-# 4. Weight Resolution: ProteinMPNN resolves model weights relative to its script 
-#    location via `os.path.realpath(__file__)` (`protein_mpnn_run.py`), so no 
-#    environment variables are required to locate them.
-# ==============================================================================
 
 # ==============================================================================
 # BASE IMAGE & GPU RUNTIME
@@ -50,8 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 WORKDIR /opt
 
 # Clone the ProteinMPNN repository self-contained and check out the exact pinned commit.
-# Includes all checkpoint files directly within /opt/ProteinMPNN/vanilla_model_weights,
-# /opt/ProteinMPNN/soluble_model_weights, etc.
 RUN git clone https://github.com/dauparas/ProteinMPNN.git \
     && cd ProteinMPNN && git checkout ${PROTEINMPNN_COMMIT}
 
