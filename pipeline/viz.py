@@ -8,7 +8,10 @@ Colour conventions: target light grey, hotspots dark red, design pose cyan, pred
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
+
+import numpy as np
 
 from . import pdb_io
 
@@ -77,11 +80,68 @@ def show_target_hotspots(
 # --- Checkpoint 2: backbone diversity --------------------------------------
 
 
+def _superpose_onto_design(
+    target_pdb: str | Path,
+    design_pdb: str | Path,
+    design_target_chain: str = "B",
+) -> str:
+    """Input target PDB text, rotated into a design's coordinate frame.
+
+    Needed because RFdiffusion recentres: the designs put their target copy at
+    the origin, while the input target sits wherever the crystal left it.
+
+    Residues are paired positionally -- valid because the target is held fixed,
+    so the design's copy is the same residues in the same order. A count
+    mismatch raises rather than superposing on whatever happens to line up: a
+    silently misplaced target would make binding modes look wrong.
+    """
+    from . import metrics
+
+    source = pdb_io.read_pdb(target_pdb)
+    chain = source.only_chain() if len(source.chains) == 1 else source[
+        next(iter(source.chains))
+    ]
+    design_target = pdb_io.read_pdb(design_pdb)[design_target_chain]
+
+    mobile = np.array([r.ca for r in chain.residues if r.ca is not None])
+    fixed = np.array([r.ca for r in design_target.residues if r.ca is not None])
+    if mobile.shape != fixed.shape:
+        raise ValueError(
+            f"cannot superpose {Path(target_pdb).name} onto chain "
+            f"{design_target_chain} of {Path(design_pdb).name}: "
+            f"{mobile.shape[0]} CA atoms vs {fixed.shape[0]}. The design's "
+            "target copy should match the input target residue for residue."
+        )
+
+    _, rotation, translation = metrics.kabsch_rmsd(mobile, fixed)
+    moved = pdb_io.Chain(
+        chain_id=chain.chain_id,
+        residues=[
+            pdb_io.Residue(
+                seq_id=r.seq_id,
+                name=r.name,
+                insertion=r.insertion,
+                atoms={
+                    a: metrics.apply_transform(c[None, :], rotation, translation)[0]
+                    for a, c in r.atoms.items()
+                },
+                bfactors=dict(r.bfactors),
+            )
+            for r in chain.residues
+        ],
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pdb_io.write_pdb([moved], Path(tmp) / "aligned_target.pdb")
+        return out.read_text()
+
+
 def show_backbone_ensemble(
     design_pdbs: list[str | Path],
     target_pdb: str | Path | None = None,
-    target_chain: str = "A",
-    binder_chain: str = "B",
+    hotspots: list[str] | None = None,
+    target_chain: str = "B",
+    binder_chain: str = "A",
     width: int = 800,
     height: int = 560,
 ):
@@ -90,27 +150,69 @@ def show_backbone_ensemble(
     Reveals whether RFdiffusion found one binding mode or several. A single
     tight cluster across all designs usually means the hotspots over-constrained
     the site.
-    """
-    view = _view(width, height)
-    if target_pdb:
-        view.addModel(_read(target_pdb), "pdb")
-        view.setStyle({"model": 0}, {"cartoon": {"color": TARGET_COLOUR}})
-        offset = 1
-    else:
-        offset = 0
 
-    for i, pdb in enumerate(design_pdbs):
+    One target copy is drawn, with `hotspots` highlighted on it in dark red so
+    binding modes can be read against the epitope they were conditioned on.
+
+    `target_chain` / `binder_chain` are the chains *inside each design*.
+
+    `hotspots` are labels in the ORIGINAL target numbering (e.g. `A59`) when
+    `target_pdb` is given, since that file keeps the original numbers. Without
+    `target_pdb` the first design's own target copy is used as the reference,
+    and the labels are renumbered through its .trb -- so pass original
+    numbering either way.
+    """
+    if not design_pdbs:
+        raise ValueError("no design PDBs to render")
+
+    view = _view(width, height)
+    designs = [Path(p) for p in design_pdbs]
+
+    # One reference target copy. Either the input file superposed into the
+    # design frame, or the first design's own copy -- which is already in the
+    # right frame and needs no transform.
+    if target_pdb:
+        view.addModel(_superpose_onto_design(target_pdb, designs[0], target_chain), "pdb")
+        reference_chain = pdb_io.read_pdb(target_pdb).chain_ids[0]
+        hotspot_labels = list(hotspots or [])
+    else:
+        from . import trb
+
+        view.addModel(_read(designs[0]), "pdb")
+        reference_chain = target_chain
+        mapping = trb.hotspots_on_design(designs[0])
+        hotspot_labels = (
+            [mapping.get(h, h) for h in hotspots] if hotspots
+            else list(mapping.values())
+        )
+
+    view.setStyle({"model": 0}, {})
+    view.setStyle({"model": 0, "chain": reference_chain},
+                  {"cartoon": {"color": TARGET_COLOUR}})
+
+    if hotspot_labels:
+        resi = _resi_selector(hotspot_labels)
+        view.setStyle({"model": 0, "chain": reference_chain, "resi": resi},
+                      {"stick": {"color": HOTSPOT_COLOUR, "radius": 0.3},
+                       "cartoon": {"color": HOTSPOT_COLOUR}})
+        for label in hotspot_labels:
+            _, resnum = pdb_io.parse_label(label)
+            view.addLabel(
+                label,
+                {"fontSize": 10, "fontColor": "white",
+                 "backgroundColor": HOTSPOT_COLOUR, "backgroundOpacity": 0.85},
+                {"model": 0, "chain": reference_chain,
+                 "resi": str(resnum), "atom": "CA"},
+            )
+
+    for i, pdb in enumerate(designs):
         view.addModel(_read(pdb), "pdb")
-        colour = BACKBONE_PALETTE[i % len(BACKBONE_PALETTE)]
-        model = {"model": i + offset}
-        if target_pdb:
-            # The design file contains the target too; hide it so the single
-            # reference copy is not drawn N times.
-            view.setStyle({**model, "chain": target_chain}, {})
-            view.setStyle({**model, "chain": binder_chain},
-                          {"cartoon": {"color": colour}})
-        else:
-            view.setStyle(model, {"cartoon": {"color": colour}})
+        model = {"model": i + 1}
+        # The design file carries the target too; hide it so the single
+        # reference copy is not drawn N times on top of itself.
+        view.setStyle(model, {})
+        view.setStyle({**model, "chain": binder_chain},
+                      {"cartoon": {"color": BACKBONE_PALETTE[i % len(BACKBONE_PALETTE)]}})
     view.zoomTo()
     return view
 
