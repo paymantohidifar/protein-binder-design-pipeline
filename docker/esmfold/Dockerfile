@@ -4,20 +4,12 @@
 # Role: Fast single-sequence monomer structure prediction gate in the design pipeline.
 #
 # PROVENANCE & TECHNICAL NOTES:
-# 1. Provenance: No upstream Dockerfile exists in facebookresearch/esm. Follows
+# 1. No upstream Dockerfile exists in facebookresearch/esm. Follows
 #    the official pip install path with [esmfold] dependencies.
-# 2. Python Version (Deliberate Deviation): Upstream README recommends Python <= 3.9.
-#    However, pytorch/pytorch:2.1.0 ships Python 3.10 by default via its Makefile.
-#    The <= 3.9 ceiling traces to the [esmfold] extra's deepspeed==0.5.9, which is
-#    sdist-only and whose classifiers stop at 3.9—the one package omitted here,
-#    since OpenFold guards it via find_spec. All 17 OpenFold/ESMFold modules on the
-#    import path byte-compile cleanly under 3.10. The interpreter guard and smoke
-#    test keep this assumption strictly verified at build time.
-# 3. GPU Architecture: Uses CUDA 11.8 / PyTorch 2.1.0 (has the same H100/sm_90
+# 2 GPU Architecture: Uses CUDA 11.8 / PyTorch 2.1.0 (has the same H100/sm_90
 #    kernel exclusion as RFdiffusion; works on A10/A100/RTX 3090/4090, but fails on H100+).
-# 4. Weight Caching: ESM-2 3B weights (~10 GB) are NOT baked into this image.
+# 3 Weight Caching: ESM-2 3B weights (~10 GB) are NOT baked into this image.
 #    They download automatically on first run into /cache (redirected via HF_HOME & TORCH_HOME).
-# ==============================================================================
 
 # ==============================================================================
 # BASE IMAGE & GPU RUNTIME
@@ -30,7 +22,7 @@ FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
 # ==============================================================================
 # BUILD ARGUMENTS & ENVIRONMENT VARIABLES
 # ==============================================================================
-# Pin OpenFold repository commit SHA (PR #199: ESMFold support) for build reproducibility
+# Pin OpenFold repository commit SHA for build reproducibility
 ARG OPENFOLD_COMMIT=4b41059694619831a7db195b7e0988fc4ff3a307
 
 # PYTHONDONTWRITEBYTECODE=1 : Disables writing temporary .pyc bytecode files to disk
@@ -60,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -c "import sys; \
 assert (3, 9) <= sys.version_info[:2] < (3, 12), \
     f'python {sys.version_info[0]}.{sys.version_info[1]} is outside the tested 3.9-3.11 window'; \
-print(f'python {sys.version.split()[0]} OK (esm README documents <=3.9; see header)')"
+print(f'python {sys.version.split()[0]} OK (esm README documents <=3.9, but 3.10/3.11 are known to work)')"
 
 # ==============================================================================
 # PYTHON DEPENDENCIES: STEP 1 (DLLOGGER)
@@ -75,6 +67,7 @@ RUN pip install --no-cache-dir \
 # ==============================================================================
 # Install fair-esm and supporting libraries required for ESMFold structure prediction.
 # NumPy is explicitly pinned to 1.26.4 to prevent breaking API changes with NumPy 2.x releases.
+# Same with PyTorch Lightning, which is pinned to <2.0.0 to avoid breaking changes in the 2.x series.
 RUN pip install --no-cache-dir \
         fair-esm==2.0.0 \
         omegaconf \
@@ -134,8 +127,7 @@ RUN python -c "import attn_core_inplace_cuda; print('OpenFold CUDA extension pre
 # Copy local inference runner script directly into /opt in the container root filesystem
 COPY fold.py /opt/fold.py
 
-# Declare /cache as an external volume mount point for model weights and HuggingFace assets,
-# ensuring large files sit on host /home storage rather than the root partition
+# Declare /cache as an external volume mount point for model weights and HuggingFace assets
 VOLUME /cache
 
 # Set /work as default working directory where input sequences and output PDBs resolve
