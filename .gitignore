@@ -10,9 +10,9 @@ __pycache__/
 .vscode/
 
 # Campaign outputs
-results/
-!results/.gitkeep
 outputs/
+results/*
+!results/.gitkeep
 
 # MISC
 examples/
