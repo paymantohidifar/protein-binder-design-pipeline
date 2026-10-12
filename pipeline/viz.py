@@ -1,4 +1,4 @@
-"""In-notebook 3D rendering and PyMOL script generation (MANIFEST Section 4).
+"""In-notebook 3D rendering and PyMOL script generation.
 
 Two outputs for every checkpoint: a py3Dmol view that renders in the notebook
 cell, and a .pml script for opening the same scene in a real PyMOL session.
@@ -36,7 +36,7 @@ def _view(width: int = 800, height: int = 520):
 
 def _resi_selector(labels: list[str]) -> str:
     """'A59','A83' -> '59,83' for py3Dmol's resi selector."""
-    return ",".join(str(pdb_io.parse_label(lab)[1]) for lab in labels)
+    return [str(pdb_io.parse_label(lab)[1]) for lab in labels]
 
 
 # --- Checkpoint 1: hotspot selection ---------------------------------------
@@ -58,6 +58,7 @@ def show_target_hotspots(
     selection = {"chain": chain, "resi": _resi_selector(labels)}
     view.setStyle(selection, {"stick": {"color": HOTSPOT_COLOUR, "radius": 0.3},
                               "cartoon": {"color": HOTSPOT_COLOUR}})
+    
     for label in labels:
         _, resnum = pdb_io.parse_label(label)
         view.addLabel(
@@ -188,15 +189,16 @@ def write_pml_hotspots(
     """PyMOL scene for the hotspot checkpoint."""
     resi = "+".join(str(pdb_io.parse_label(lab)[1]) for lab in labels)
     script = f"""\
-# Hotspot selection checkpoint (MANIFEST Section 4)
+# Hotspot selection checkpoint
 load {Path(target_pdb).resolve()}, target
 hide everything
 show surface, target
+show cartoon, target
 color grey80, target
-set transparency, 0.35, target
+set transparency, 0.65, target
 select hotspots, target and chain {chain} and resi {resi}
 show sticks, hotspots
-color darkred, hotspots
+color red, hotspots
 set label_size, 16
 set label_color, white
 label hotspots and name CA, "%s%s" % (resi, resn)
