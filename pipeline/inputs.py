@@ -10,9 +10,24 @@ and probably silently: ColabFold reading a Boltz file sees one long
 concatenated monomer, which would yield a confident-looking prediction of the
 wrong thing.
 
-FORMAT CAVEAT: the Boltz-2 header convention here is written from its
-documented format and has NOT been verified against a real run. Confirm during
-the Phase A smoke test.
+BOLTZ-2 HEADER FORMAT -- now VERIFIED against boltz 2.2.1 source, after a real
+run rejected our Step 3 FASTA with `ValueError: Invalid record id`. Three rules,
+each of which fails differently if broken (`data/parse/fasta.py`):
+
+  >CHAIN_ID|ENTITY_TYPE|MSA_ID
+
+1. `|` is mandatory. A bare `>design_0_seq001` raises
+   `Invalid record id` (fasta.py:56). ESMFold accepts such a header, Boltz-2
+   does not, which is why one shared FASTA cannot feed both.
+2. `MSA_ID` must be the literal `empty` for single-sequence mode. Omitting the
+   field gives `msa=None -> 0`, which means *auto-generate*, and boltz then
+   raises `Missing MSA's in input and --use_msa_server flag not set.`
+   (main.py:582). `empty` maps to -1, i.e. genuine single-sequence
+   (schema.py:1127) -- the database-free path this campaign requires.
+3. One file per prediction. `parse_fasta` turns EVERY record in a file into a
+   chain of ONE target, and the job name is the file stem (fasta.py:137). So a
+   10-record FASTA is a 10-chain complex, not 10 monomers -- a wrong answer
+   with no error.
 """
 
 from __future__ import annotations
@@ -52,6 +67,34 @@ def write_colabfold_complex_fasta(
             binder = sample.chain(binder_chain_index)
             fh.write(f">{sample.sequence_id}\n{binder}:{target_seq}\n")
     return out_path
+
+
+def write_boltz_monomer_fastas(
+    samples: list,
+    out_dir: str | Path,
+    binder_chain_index: int = 0,
+) -> list[Path]:
+    """One single-chain file per candidate, for the Step 3B monomer gate.
+
+    The Boltz-2 counterpart of `parsers.binder_fasta`, which writes one
+    multi-record FASTA for ESMFold. That file CANNOT be reused here: its
+    `>design_0_seq001` headers raise `Invalid record id`, and even with headers
+    fixed, all records in one file would be parsed as a single multi-chain
+    complex rather than separate monomers (see module docstring).
+
+    Files are named `<sequence_id>.fasta` because boltz derives the job name
+    from the file stem and writes to `<out_dir>/predictions/<stem>/`, which is
+    what lets `parsers.parse_boltz2_monomer` locate a candidate's structure by
+    globbing on its sequence_id.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for sample in samples:
+        path = out_dir / f"{sample.sequence_id}.fasta"
+        path.write_text(f">A|protein|empty\n{sample.chain(binder_chain_index)}\n")
+        written.append(path)
+    return written
 
 
 def write_boltz_complex_fastas(
