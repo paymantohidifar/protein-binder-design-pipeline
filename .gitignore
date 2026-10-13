@@ -11,7 +11,7 @@ __pycache__/
 
 # Campaign outputs
 outputs/
-results/*
+# results/*
 !results/.gitkeep
 
 # MISC
