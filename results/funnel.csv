@@ -1,0 +1,4 @@
+stage,entered,passed,pass_rate,failed_threshold,failed_missing,top_reason
+gate3a,10,0,0.0,0,10,plddt
+gate3b,10,0,0.0,0,10,plddt
+step4,10,0,0.0,0,10,iptm
