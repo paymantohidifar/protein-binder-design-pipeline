@@ -31,13 +31,48 @@
 # ==============================================================================
 # BASE IMAGE & GPU RUNTIME
 # ==============================================================================
-# Pulls PyTorch's official runtime image (PyTorch 2.4.0 + CUDA 12.1 + cuDNN 9).
-# The 'runtime' variant excludes C++ compilers, saving gigabytes on the root drive.
+# Pulls PyTorch's official runtime image (PyTorch 2.6.0 + CUDA 12.6 + cuDNN 9).
+# The 'runtime' variant excludes C++ compilers, saving gigabytes on the root drive;
+# nothing here compiles, since cuEquivariance ships prebuilt .so files.
 #
-# PYTHON COMPATIBILITY: Boltz requires Python >=3.10,<3.13. PyTorch 2.4.0 ships
-# with Python 3.11 (via PyTorch's docker.Makefile), satisfying this constraint.
-# Do NOT upgrade this base image tag to a release with Python 3.13, or pip will fail.
-FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+# THE CUDA FLOOR IS 12.5, AND IT IS WHAT CHOSE THIS TAG.
+# The previous base was cuda12.1 and produced this at the first prediction step:
+#
+#   Error while loading libcue_ops.so: undefined symbol:
+#   cublasGemmGroupedBatchedEx, version libcublas.so.12
+#   ImportError: Error importing triangle_multiplicative_update from
+#   cuequivariance_ops_torch.
+#
+# `cublasGemmGroupedBatchedEx` (grouped batched GEMM) is a cuBLAS >= 12.5
+# symbol. The dependency is declared, not inferred:
+#
+#   cuequivariance-ops-torch-cu12 -> cuequivariance-ops-cu12
+#                                 -> nvidia-cublas-cu12>=12.5.0
+#
+# so pip DID install a >= 12.5 cuBLAS wheel; the dynamic loader simply resolved
+# the image's own CUDA 12.1 libcublas.so.12 first. A cuda12.6 base removes the
+# conflict rather than fighting the search order with LD_LIBRARY_PATH, and 12.6
+# satisfies the floor for every cuEquivariance release (0.12.0 declares the
+# same >= 12.5). Do NOT move this below cuda12.5.
+#
+# PYTHON COMPATIBILITY: Boltz requires Python >=3.10,<3.13. Every
+# pytorch/pytorch tag from 2.6.0 through 2.14.1 ships Python 3.11 (checked
+# against docker.Makefile's PYTHON_VERSION at each release tag), so this
+# constraint does not pin the choice. Do NOT move to a tag shipping 3.13.
+#
+# WHY 2.6.0 AND NOT A NEWER TORCH: 2.6.0 is the OLDEST tag with cuda >= 12.5,
+# which keeps the stack closest to what boltz 2.2.1 was tested against (it pins
+# pytorch-lightning==2.5.0, contemporaneous with torch 2.5-2.6). Newer tags up
+# to 2.14.1 exist and would additionally permit cuequivariance 0.11.1+, whose
+# torch floor is >= 2.11 -- but that trades five more minor versions of drift
+# for unquantified kernel gains.
+#
+# torch 2.6 FLIPPED `torch.load`'s weights_only DEFAULT to True. Checked, not
+# assumed: boltz makes no direct torch.load call, it uses
+# Boltz2.load_from_checkpoint, and pytorch-lightning 2.5.0 passes
+# `weights_only=False` explicitly (lightning_fabric/utilities/cloud_io.py,
+# `_load`), so checkpoint loading is unaffected.
+FROM pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime
 
 # ==============================================================================
 # BUILD ARGUMENTS & ENVIRONMENT VARIABLES
@@ -131,12 +166,24 @@ RUN pip install --no-cache-dir \
 # BUILT CLEANLY and only broke at the first real `boltz predict`, after the
 # instance was already running. Importing torchvision.ops is the exact
 # operation that was failing, so it is what gets asserted.
+#
+# IT MUST BE cuequivariance_ops_torch, NOT cuequivariance_torch. An earlier
+# revision imported the wrapper, which PASSED while the kernels were in fact
+# unloadable: the wrapper defers `from cuequivariance_ops_torch import
+# triangle_multiplicative_update` to INSIDE the function
+# (cuequivariance_torch/primitives/triangle.py:238), so nothing touches
+# libcue_ops.so until the first forward pass. Importing the ops package eagerly
+# forces the dlopen -- which needs no GPU, because the cuBLAS failure was an
+# undefined symbol at link time -- so the cuda12.1 mismatch would have failed
+# the build instead of 10 predictions into a GPU-billed run.
 RUN python -c "import torch, torchvision; \
 from torchvision.ops import nms; \
-import cuequivariance_torch; \
-assert torch.__version__.startswith('2.4.'), \
+import cuequivariance_ops_torch; \
+from cuequivariance_ops_torch import triangle_multiplicative_update; \
+assert torch.__version__.startswith('2.6.'), \
     f'torch moved to {torch.__version__}; a dependency upgraded it off the base image'; \
-print(f'torch {torch.__version__} / torchvision {torchvision.__version__} -- ops register OK')"
+print(f'torch {torch.__version__} / torchvision {torchvision.__version__} -- ops register OK'); \
+print('cuequivariance triangle kernels loadable OK')"
 
 # Confirm the installed numba actually reads NUMBA_CACHE_DIR, so a future numba
 # that renames the variable fails the build rather than the first design run.
