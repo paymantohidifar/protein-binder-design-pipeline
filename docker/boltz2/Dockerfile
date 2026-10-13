@@ -131,10 +131,41 @@ ARG CUEQUIVARIANCE_VERSION=0.10.0
 # `--rm` runs, so the JIT cost is paid once per campaign rather than per design.
 # Note PYTHONDONTWRITEBYTECODE is unrelated: numba creates its cache dirs
 # itself and never consults sys.dont_write_bytecode.
+# THE RECURRING DEFECT CLASS IN THIS IMAGE: a library writes to `~` and there
+# is no writable HOME under `--user $UID:$GID`. HOME resolves to `/`, so every
+# `~/.cache/<x>` becomes `/.cache/<x>`, which is root-owned. Three instances so
+# far, each a crash at a different depth of the first real prediction:
+#
+#   numba          RuntimeError: cannot cache function
+#                  '_prepare_msa_arrays_inner': no locator available
+#   cuEquivariance PermissionError: [Errno 13] Permission denied: '/.cache'
+#                  (cuequivariance_ops/triton/cache_manager.py:55, at IMPORT)
+#   triton         would be next -- Path.home()/".triton"/"cache"
+#                  (triton/runtime/cache.py:17), reached when the kernels
+#                  actually compile
+#
+# XDG_CACHE_HOME is the class-level fix: platformdirs and appdirs both honour
+# it, which covers cuEquivariance's `user_cache_dir(appname=...)` and numba's
+# `AppDirs(appname="numba")`. The three specific variables are set anyway, so
+# the redirect does not depend on any library choosing to consult XDG.
+#
+# Each is a real, read knob, verified in source rather than guessed:
+#   CUEQ_TRITON_CACHE_DIR  cuequivariance_ops/triton/cache_manager.py:45
+#                          (`overridden_cache_dir()`); a pure path redirect --
+#                          it only additionally suppresses a root-in-Docker
+#                          warning, it changes no behaviour
+#   TRITON_CACHE_DIR       triton/runtime/cache.py:65
+#   NUMBA_CACHE_DIR        numba/core/caching.py:205 (_UserProvidedCacheLocator)
+#
+# All point under /cache, the declared VOLUME, so compiled kernels and JIT
+# artifacts survive `--rm` and are paid for once per campaign, not per design.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     BOLTZ_CACHE=/cache/boltz \
-    NUMBA_CACHE_DIR=/cache/numba
+    NUMBA_CACHE_DIR=/cache/numba \
+    XDG_CACHE_HOME=/cache \
+    CUEQ_TRITON_CACHE_DIR=/cache/cuequivariance-triton \
+    TRITON_CACHE_DIR=/cache/triton
 
 # ==============================================================================
 # SYSTEM PACKAGES SETUP
