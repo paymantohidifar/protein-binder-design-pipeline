@@ -117,10 +117,53 @@ probe proteinmpnn python "Checking ProteinMPNN CUDA/GPU compatibility" -c "$TORC
        ProteinMPNN falls back to CPU silently (protein_mpnn_run.py:68), leading to significant slowdowns.
        CUDA 11.8 covers sm_80-sm_90; verify host driver and runtime configurations."
 
-# --- 3. Boltz-2 Probe ---
+# --- 3. Boltz-2 Probe (PyTorch Layer) ---
 probe boltz2 python "Checking Boltz-2 CUDA/GPU compatibility" -c "$TORCH_PROBE" \
 || log_fatal "Boltz-2 image cannot run on this GPU.
-       PyTorch 2.4/cu121 covers sm_80-sm_90; check NVIDIA host driver or nvidia-container-toolkit setup."
+       PyTorch 2.6/cu126 covers sm_80-sm_90; check NVIDIA host driver or nvidia-container-toolkit setup."
+
+# --- 3b. Boltz-2 Probe (cuEquivariance Kernel Layer) ---
+# This is the ONLY place the kernels can be verified. libcue_ops.so links
+# against libcuda.so.1 (the driver stub), absent during `docker build`, so the
+# Dockerfile's own check is non-fatal by necessity. Two distinct failures have
+# reached a GPU-billed run here:
+#   1. undefined symbol: cublasGemmGroupedBatchedEx -- cuBLAS < 12.5 in the
+#      base image, while cuequivariance-ops-cu12 declares >= 12.5.
+#   2. the import succeeding but the kernel erroring on first forward pass.
+# So the probe loads the ops package AND calls the kernel on a real tensor.
+# Separates "cannot load" from "loads but cannot execute", the same split the
+# OpenFold probe makes. Shapes and dtypes follow the upstream docstring's own
+# example: x is (batch, seq, seq, hidden) float32, mask is (batch, seq, seq)
+# FLOAT (1 = valid, 0 = masked, not bool), and hidden_dim must be a multiple
+# of 32 -- a documented limitation. Weights are left at their Optional None
+# defaults, as that example does.
+readonly CUEQ_PROBE='
+import sys, torch
+try:
+    import cuequivariance_ops_torch  # forces the dlopen of libcue_ops.so
+except Exception as e:
+    sys.exit(f"cuEquivariance kernels are NOT loadable: {type(e).__name__}: {e}")
+
+from cuequivariance_torch import triangle_multiplicative_update
+
+n, d = 32, 32
+x = torch.randn(1, n, n, d, device="cuda")
+mask = torch.ones(1, n, n, device="cuda")
+try:
+    out = triangle_multiplicative_update(x, direction="outgoing", mask=mask)
+    torch.cuda.synchronize()
+except Exception as e:
+    sys.exit(f"cuEquivariance kernel loaded but FAILED to execute: {type(e).__name__}: {e}")
+print(f"OK: cuEquivariance triangle kernel executed, out={tuple(out.shape)} "
+      f"| cuBLAS >= 12.5 satisfied | CUDA v{torch.version.cuda}")'
+
+probe boltz2 python "Checking Boltz-2 cuEquivariance triangle kernels" -c "$CUEQ_PROBE" \
+|| log_fatal "Boltz-2 cuEquivariance kernels unusable on this host.
+       These accelerate the triangular multiplicative update; without them boltz
+       must run with --no_kernels (correct results, slower).
+       If the error mentions 'cublasGemmGroupedBatchedEx', the base image's CUDA
+       is below 12.5 -- cuequivariance-ops-cu12 requires nvidia-cublas-cu12>=12.5.0.
+       Current base is pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime."
 
 # --- 4. ESMFold Probe (PyTorch Layer) ---
 probe esmfold python "Checking ESMFold PyTorch/GPU compatibility" -c "$TORCH_PROBE" \
