@@ -167,23 +167,40 @@ RUN pip install --no-cache-dir \
 # instance was already running. Importing torchvision.ops is the exact
 # operation that was failing, so it is what gets asserted.
 #
-# IT MUST BE cuequivariance_ops_torch, NOT cuequivariance_torch. An earlier
-# revision imported the wrapper, which PASSED while the kernels were in fact
-# unloadable: the wrapper defers `from cuequivariance_ops_torch import
-# triangle_multiplicative_update` to INSIDE the function
-# (cuequivariance_torch/primitives/triangle.py:238), so nothing touches
-# libcue_ops.so until the first forward pass. Importing the ops package eagerly
-# forces the dlopen -- which needs no GPU, because the cuBLAS failure was an
-# undefined symbol at link time -- so the cuda12.1 mismatch would have failed
-# the build instead of 10 predictions into a GPU-billed run.
+# Scope: torch/torchvision ONLY. The cuEquivariance kernels cannot be checked
+# here -- see the non-fatal probe below for why.
 RUN python -c "import torch, torchvision; \
 from torchvision.ops import nms; \
-import cuequivariance_ops_torch; \
-from cuequivariance_ops_torch import triangle_multiplicative_update; \
 assert torch.__version__.startswith('2.6.'), \
     f'torch moved to {torch.__version__}; a dependency upgraded it off the base image'; \
-print(f'torch {torch.__version__} / torchvision {torchvision.__version__} -- ops register OK'); \
-print('cuequivariance triangle kernels loadable OK')"
+print(f'torch {torch.__version__} / torchvision {torchvision.__version__} -- ops register OK')"
+
+# Separate and deliberately NON-FATAL: cuEquivariance's kernels.
+#
+# `libcue_ops.so` links against `libcuda.so.1`, the NVIDIA DRIVER stub, which
+# the nvidia container runtime injects at RUN time and which does not exist
+# during `docker build`. So this import cannot succeed here regardless of
+# whether the image is correct:
+#
+#   Error while loading libcue_ops.so: libcuda.so.1: cannot open shared
+#   object file: No such file or directory
+#
+# A previous revision asserted this fatally, on the mistaken belief that the
+# cuBLAS mismatch was a pure link-time symbol check needing no driver. It is
+# not: the driver dependency fails first, so the build broke on a healthy
+# image. The authoritative check is `docker/build_all.sh`, which runs with
+# `--gpus all` where libcuda.so.1 is present -- exactly the arrangement the
+# esmfold image already uses for OpenFold's CUDA extension.
+#
+# The import must still name cuequivariance_ops_torch, NOT cuequivariance_torch:
+# the wrapper defers `from cuequivariance_ops_torch import
+# triangle_multiplicative_update` to INSIDE the function
+# (cuequivariance_torch/primitives/triangle.py:238), so importing the wrapper
+# dlopens nothing and reports success on an image whose kernels are unusable.
+RUN python -c "import cuequivariance_ops_torch; \
+from cuequivariance_ops_torch import triangle_multiplicative_update; \
+print('cuequivariance triangle kernels loadable OK')" \
+    || echo "NOTE: cuEquivariance kernels not loadable at build time (no libcuda.so.1); build_all.sh verifies on the GPU host"
 
 # Confirm the installed numba actually reads NUMBA_CACHE_DIR, so a future numba
 # that renames the variable fails the build rather than the first design run.
