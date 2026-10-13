@@ -83,13 +83,37 @@ log_info "Successfully built: ${built_images[*]}"
 #                      guarantee OpenFold custom C++/CUDA extension compatibility.
 # -----------------------------------------------------------------------------
 
+# The shared cache, resolved exactly as pipeline/docker.py::cache_dir() does, so
+# probes see the same mount the campaign will. Created here as the invoking user:
+# letting `docker run -v` create a missing path would make it root-owned, which
+# is the hazard the --user mapping exists to avoid.
+readonly BINDER_CACHE="${BINDER_CACHE:-$HOME/.cache/binder-pipeline}"
+mkdir -p "$BINDER_CACHE"
+
+# A probe MUST run the way the campaign runs, which means unprivileged and with
+# /cache mounted. This is not cosmetic -- it is the difference between catching
+# a defect here and catching it on a GPU-billed instance.
+#
+# Two of the four Boltz-2 defects were invisible to the previous version of this
+# function, which ran as ROOT with NO cache mount:
+#
+#   numba          'no locator available' -- root can write into
+#                  site-packages/__pycache__, uid 1000 cannot
+#   cuEquivariance PermissionError: '/.cache' -- root can create /.cache,
+#                  uid 1000 cannot
+#
+# Both passed every probe and then failed on the first real prediction. Running
+# as root tests a configuration that never ships.
 probe() {
     local name="$1" ep="$2" label="$3"; shift 3
     # Skip probe if target wasn't selected in this run
     [[ " ${TARGETS[*]} " == *" $name "* ]] || return 0
-    
+
     log_info "$label"
-    docker run --rm --gpus all --entrypoint "$ep" "binder-${name}:latest" "$@"
+    docker run --rm --gpus all \
+        --user "$(id -u):$(id -g)" \
+        -v "$BINDER_CACHE:/cache" \
+        --entrypoint "$ep" "binder-${name}:latest" "$@"
 }
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
