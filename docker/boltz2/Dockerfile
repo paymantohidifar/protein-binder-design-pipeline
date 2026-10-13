@@ -189,18 +189,35 @@ print(f'torch {torch.__version__} / torchvision {torchvision.__version__} -- ops
 # cuBLAS mismatch was a pure link-time symbol check needing no driver. It is
 # not: the driver dependency fails first, so the build broke on a healthy
 # image. The authoritative check is `docker/build_all.sh`, which runs with
-# `--gpus all` where libcuda.so.1 is present -- exactly the arrangement the
-# esmfold image already uses for OpenFold's CUDA extension.
+# `--gpus all`, where the nvidia container runtime injects the driver
+# libraries -- exactly the arrangement the esmfold image already uses for
+# OpenFold's CUDA extension. CONFIRMED on an A10: that probe reports
+# `cuEquivariance triangle kernel executed, out=(1, 32, 32, 32)`.
 #
 # The import must still name cuequivariance_ops_torch, NOT cuequivariance_torch:
 # the wrapper defers `from cuequivariance_ops_torch import
 # triangle_multiplicative_update` to INSIDE the function
 # (cuequivariance_torch/primitives/triangle.py:238), so importing the wrapper
 # dlopens nothing and reports success on an image whose kernels are unusable.
-RUN python -c "import cuequivariance_ops_torch; \
+#
+# `import torch` comes first deliberately. torch's __init__ preloads the NVIDIA
+# pip wheels it depends on (nvidia-cuda-nvrtc-cu12 and friends), which puts
+# libnvrtc.so.12 in the process. Without it, this layer reported a MISLEADING
+# cause -- the observed build output was
+#
+#   Error while loading libcue_ops.so: libnvrtc.so.12: cannot open shared
+#   object file
+#
+# i.e. NVRTC, not the driver, because nothing had loaded torch yet. Production
+# always imports torch before reaching these kernels, so importing it here
+# makes the diagnostic reflect the real remaining gap. The message below names
+# no specific library for the same reason: which one is missing depends on the
+# base image flavour and on what has been loaded first.
+RUN python -c "import torch; \
+import cuequivariance_ops_torch; \
 from cuequivariance_ops_torch import triangle_multiplicative_update; \
 print('cuequivariance triangle kernels loadable OK')" \
-    || echo "NOTE: cuEquivariance kernels not loadable at build time (no libcuda.so.1); build_all.sh verifies on the GPU host"
+    || echo "NOTE: cuEquivariance kernels not loadable at build time (expected -- needs CUDA driver/toolkit libraries the nvidia runtime provides only at run time); build_all.sh verifies on the GPU host"
 
 # Confirm the installed numba actually reads NUMBA_CACHE_DIR, so a future numba
 # that renames the variable fails the build rather than the first design run.
