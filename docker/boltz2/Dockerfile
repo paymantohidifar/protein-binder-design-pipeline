@@ -170,10 +170,62 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # ==============================================================================
 # SYSTEM PACKAGES SETUP
 # ==============================================================================
-# 1. Update apt package index and install git without optional recommended dependencies
-# 2. Immediately purge apt index files in the same layer to minimize final image size
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# 1. git -- pip needs it for any VCS requirement.
+# 2. build-essential -- a C COMPILER IS A RUNTIME DEPENDENCY here, not a build
+#    one, which is why a 'runtime' base image is not sufficient on its own.
+#    Triton JIT-compiles a small CPython extension (`cuda_utils`) from
+#    third_party/nvidia/backend/driver.c on its FIRST kernel launch, and
+#    triton/runtime/build.py:28 looks for $CC, then gcc, then clang. With none
+#    present the campaign dies mid-prediction with:
+#
+#      RuntimeError: Failed to find C compiler. Please specify via CC
+#      environment variable.
+#
+#    Reached through cuEquivariance's fused layer norm
+#    (fused_layer_norm_torch.py:160 -> triton jit.py:568 -> driver init), i.e.
+#    only once a REAL boltz forward pass runs the triangular update with actual
+#    LayerNorm weights. The compile result is cached under TRITON_CACHE_DIR, so
+#    the cost is paid once per campaign -- but the compiler must be present for
+#    that first run and for any later cache miss (e.g. a triton version bump).
+# 3. Purge apt lists in the same layer to keep the image small.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# ==============================================================================
+# LINKER PATH FOR TRITON'S JIT (-lcuda)
+# ==============================================================================
+# That same triton build links against the CUDA driver: `libraries = ['cuda']`
+# (third_party/nvidia/backend/driver.py:16), so the linker needs a file named
+# exactly `libcuda.so`. The nvidia container runtime injects `libcuda.so.1` --
+# the versioned SONAME, with no `.so` development symlink -- so `-lcuda` fails
+# even on a host with a working driver.
+#
+# Both plausible sources are handled at build time so the outcome is
+# deterministic rather than dependent on the base flavour:
+#   * a CUDA toolkit stub, if this base carries one ('devel' tags do);
+#   * otherwise a symlink to where the runtime injects the real driver library.
+#     That symlink DANGLES at build time and resolves under `--gpus`, which is
+#     fine: it is consumed only by the linker, at which point the file exists.
+#
+# Linking against a stub and loading the real driver at run time is the
+# standard CUDA arrangement -- the SONAME recorded is `libcuda.so.1`, which
+# ldconfig resolves to the injected driver.
+#
+# LIBRARY_PATH (not LD_LIBRARY_PATH) is the correct variable: it is gcc's
+# link-time search path. Using LD_LIBRARY_PATH would shadow the real driver at
+# load time, which is exactly what must not happen.
+RUN mkdir -p /opt/cuda-link \
+    && if [ -e /usr/local/cuda/lib64/stubs/libcuda.so ]; then \
+           ln -s /usr/local/cuda/lib64/stubs/libcuda.so /opt/cuda-link/libcuda.so; \
+           echo "cuda-link: using the CUDA toolkit stub"; \
+       else \
+           ln -s /usr/lib/x86_64-linux-gnu/libcuda.so.1 /opt/cuda-link/libcuda.so; \
+           echo "cuda-link: symlink to the driver library injected at run time (dangling until --gpus)"; \
+       fi \
+    && ls -l /opt/cuda-link
+ENV LIBRARY_PATH=/opt/cuda-link
 
 # ==============================================================================
 # PYTHON PACKAGE INSTALLATION
