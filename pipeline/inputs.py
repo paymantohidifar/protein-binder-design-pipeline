@@ -2,37 +2,53 @@
 
 Separate from parsers.py: that reads tool output, this writes tool input.
 
-Boltz-2 and ColabFold take DIFFERENT complex formats, so one shared FASTA
-cannot serve both -- ColabFold joins chains with ':' inside a single record,
-while Boltz-2 uses one header per chain with a `>CHAIN|protein` convention.
-Writing a single `complexes.fasta` for both would fail for at least one engine,
-and probably silently: ColabFold reading a Boltz file sees one long
-concatenated monomer, which would yield a confident-looking prediction of the
-wrong thing.
+BOLTZ-2 USES YAML, NOT FASTA. Upstream `docs/prediction.md` states: *"YAML is
+preferred; FASTA is deprecated"* and *"FASTA format is still supported but is
+deprecated and only supports a limited subset of features compared to YAML."*
+FASTA cannot express modified residues, covalent bonds, pocket conditioning, or
+affinity. None of those are used today, but the campaign should not sit on a
+deprecated path, and pocket conditioning is a decision we may want later (see
+`write_boltz_complex_yamls`).
 
-BOLTZ-2 HEADER FORMAT -- now VERIFIED against boltz 2.2.1 source, after a real
-run rejected our Step 3 FASTA with `ValueError: Invalid record id`. Three rules,
-each of which fails differently if broken (`data/parse/fasta.py`):
+The schema, one file per prediction:
 
-  >CHAIN_ID|ENTITY_TYPE|MSA_ID
+    version: 1
+    sequences:
+      - protein:
+          id: A
+          sequence: <binder>
+          msa: empty
+      - protein:
+          id: B
+          sequence: <target>
+          msa: empty
 
-1. `|` is mandatory. A bare `>design_0_seq001` raises
-   `Invalid record id` (fasta.py:56). ESMFold accepts such a header, Boltz-2
-   does not, which is why one shared FASTA cannot feed both.
-2. `MSA_ID` must be the literal `empty` for single-sequence mode. Omitting the
-   field gives `msa=None -> 0`, which means *auto-generate*, and boltz then
-   raises `Missing MSA's in input and --use_msa_server flag not set.`
-   (main.py:582). `empty` maps to -1, i.e. genuine single-sequence
-   (schema.py:1127) -- the database-free path this campaign requires.
-3. One file per prediction. `parse_fasta` turns EVERY record in a file into a
-   chain of ONE target, and the job name is the file stem (fasta.py:137). So a
-   10-record FASTA is a 10-chain complex, not 10 monomers -- a wrong answer
-   with no error.
+Three rules survive the format change, each of which fails differently when
+broken:
+
+1. **`msa` must be the literal `empty` for single-sequence mode.** Upstream:
+   *"To force single-sequence mode (not recommended, as it reduces accuracy),
+   set `msa: empty`."* Omitting the key means `msa=0`, i.e. *auto-generate*,
+   and boltz then raises `Missing MSA's in input and --use_msa_server flag not
+   set.` (main.py:582). `empty` maps to -1 (schema.py:1127) -- the
+   database-free path this campaign requires by default.
+2. **One file per prediction.** Every entry under `sequences:` becomes a CHAIN
+   of ONE target, and the job name is the file stem. A file holding ten
+   candidates is a ten-chain complex, not ten monomers -- a wrong answer with
+   no error. This was an observed defect, originally via FASTA.
+3. **`version: 1` is required** by `parse_boltz_schema`.
+
+ColabFold is unaffected and still takes a single FASTA record with chains
+joined by ':'. The two engines have never shared an input file and must not:
+ColabFold reading a Boltz input would see one concatenated monomer and predict
+the wrong thing confidently.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import yaml
 
 from . import pdb_io
 
@@ -69,55 +85,125 @@ def write_colabfold_complex_fasta(
     return out_path
 
 
-def write_boltz_monomer_fastas(
+BOLTZ_SCHEMA_VERSION = 1
+BOLTZ_INPUT_SUFFIXES = (".yaml", ".yml", ".fasta", ".fa", ".fas")
+
+# `msa: empty` forces single-sequence mode. Omitting the key entirely means
+# "auto-generate", which requires --use_msa_server; anything else is read as a
+# path to a custom .a3m/.csv alignment.
+MSA_SINGLE_SEQUENCE = "empty"
+
+
+def _boltz_yaml(chains: list[tuple[str, str]], msa: str | None) -> str:
+    """Render one Boltz-2 input document.
+
+    `chains` is [(chain_id, sequence), ...] in the order they should appear.
+    `msa` is `"empty"` for single-sequence mode, a path for a custom
+    alignment, or None to omit the key so boltz generates one (which then
+    requires `--use_msa_server`).
+    """
+    sequences = []
+    for chain_id, sequence in chains:
+        protein: dict[str, object] = {"id": chain_id, "sequence": sequence}
+        if msa is not None:
+            protein["msa"] = msa
+        sequences.append({"protein": protein})
+    # sort_keys=False keeps id/sequence/msa in reading order; default_flow_style
+    # False keeps it block-style, which is what the documented schema shows.
+    return yaml.safe_dump(
+        {"version": BOLTZ_SCHEMA_VERSION, "sequences": sequences},
+        sort_keys=False,
+        default_flow_style=False,
+    )
+
+
+def _clear_boltz_inputs(out_dir: Path) -> int:
+    """Remove stale input files, returning how many went.
+
+    Boltz is pointed at a DIRECTORY and globs every `*` in it, so leftovers
+    from an earlier run are silently predicted again. Worse, migrating from
+    FASTA to YAML would leave `X.fasta` beside `X.yaml` -- two files with the
+    same stem, hence the same job name, so one prediction would be skipped as
+    "existing" and which one won is undefined. Only input-shaped files are
+    touched, and only in a directory these writers own.
+    """
+    removed = 0
+    for path in sorted(out_dir.glob("*")):
+        if path.is_file() and path.suffix.lower() in BOLTZ_INPUT_SUFFIXES:
+            path.unlink()
+            removed += 1
+    return removed
+
+
+def write_boltz_monomer_yamls(
     samples: list,
     out_dir: str | Path,
     binder_chain_index: int = 0,
+    msa: str | None = MSA_SINGLE_SEQUENCE,
 ) -> list[Path]:
-    """One single-chain file per candidate, for the Step 3B monomer gate.
+    """One single-chain YAML per candidate, for the Step 3B monomer gate.
 
     The Boltz-2 counterpart of `parsers.binder_fasta`, which writes one
-    multi-record FASTA for ESMFold. That file CANNOT be reused here: its
-    `>design_0_seq001` headers raise `Invalid record id`, and even with headers
-    fixed, all records in one file would be parsed as a single multi-chain
-    complex rather than separate monomers (see module docstring).
+    multi-record FASTA for ESMFold. That file cannot be reused here: ESMFold's
+    `>design_0_seq001` headers are not a Boltz input format at all, and even
+    in Boltz's own FASTA dialect all records in one file would be parsed as a
+    single multi-chain complex rather than separate monomers.
 
-    Files are named `<sequence_id>.fasta` because boltz derives the job name
+    Files are named `<sequence_id>.yaml` because boltz derives the job name
     from the file stem and writes to `<out_dir>/predictions/<stem>/`, which is
     what lets `parsers.parse_boltz2_monomer` locate a candidate's structure by
     globbing on its sequence_id.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    _clear_boltz_inputs(out_dir)
     written = []
     for sample in samples:
-        path = out_dir / f"{sample.sequence_id}.fasta"
-        path.write_text(f">A|protein|empty\n{sample.chain(binder_chain_index)}\n")
+        path = out_dir / f"{sample.sequence_id}.yaml"
+        path.write_text(_boltz_yaml([("A", sample.chain(binder_chain_index))], msa))
         written.append(path)
     return written
 
 
-def write_boltz_complex_fastas(
+def write_boltz_complex_yamls(
     samples: list,
     target_seq: str,
     out_dir: str | Path,
     binder_chain_index: int = 0,
+    msa: str | None = MSA_SINGLE_SEQUENCE,
 ) -> list[Path]:
-    """One file per candidate, one header per chain.
+    """One two-chain YAML per candidate: binder as A, target as B.
 
-    Boltz-2 predicts a single complex per input file, so a batch is a directory
-    of files rather than one multi-record FASTA.
+    Chain order is binder-first to match what ColabFold receives, so both Step
+    4 engines share one chain convention -- which is NOT the design PDB's
+    layout, and is why `parsers` is passed chain ids explicitly.
+
+    POCKET CONDITIONING IS DELIBERATELY NOT USED, although YAML is the only
+    format that offers it:
+
+        constraints:
+          - pocket:
+              binder: A
+              contacts: [[B, 146], [B, 170], [B, 178]]
+              max_distance: 6
+
+    Our hotspots are known, so this is tempting. It would be a mistake here.
+    Step 4 exists to ask *independently* whether the binder docks at the
+    epitope it was designed against; conditioning the validator on that answer
+    turns the check into a restatement of the design intent and would inflate
+    pass rates. It would also make the two Step 4 engines non-comparable, since
+    ColabFold has no equivalent -- and the engine comparison is the whole
+    reason both run. Worth revisiting only as a separate, labelled experiment.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    _clear_boltz_inputs(out_dir)
     written = []
     for sample in samples:
-        binder = sample.chain(binder_chain_index)
-        path = out_dir / f"{sample.sequence_id}.fasta"
-        path.write_text(
-            f">A|protein|empty\n{binder}\n"
-            f">B|protein|empty\n{target_seq}\n"
-        )
+        path = out_dir / f"{sample.sequence_id}.yaml"
+        path.write_text(_boltz_yaml(
+            [("A", sample.chain(binder_chain_index)), ("B", target_seq)], msa
+        ))
         written.append(path)
     return written
 
@@ -128,12 +214,17 @@ def write_controls(
     out_dir: str | Path,
     positive_sequence: str | None = None,
     seed: int = 0,
+    msa: str | None = MSA_SINGLE_SEQUENCE,
 ) -> dict[str, Path]:
     """Positive and negative controls for Step 4.
 
     Without these a zero-lead campaign cannot be interpreted: it looks identical
     whether the gates are working, or `pae_interaction` has its sign or its
     index blocks wrong.
+
+    `msa` must match what the real candidates get: a control predicted in a
+    different MSA regime is not a control, since MSA depth shifts the
+    `pae_interaction` distribution it is meant to calibrate.
 
     The negative is a length-matched shuffle of a real lead, which preserves
     amino-acid composition while destroying the fold -- so it isolates structure
@@ -149,16 +240,18 @@ def write_controls(
     random.Random(seed).shuffle(scrambled)
     paths = {}
 
-    negative = out_dir / "control_negative_scramble.fasta"
-    negative.write_text(
-        f">A|protein|empty\n{''.join(scrambled)}\n>B|protein|empty\n{target_seq}\n"
-    )
+    _clear_boltz_inputs(out_dir)
+
+    negative = out_dir / "control_negative_scramble.yaml"
+    negative.write_text(_boltz_yaml(
+        [("A", "".join(scrambled)), ("B", target_seq)], msa
+    ))
     paths["negative"] = negative
 
     if positive_sequence:
-        positive = out_dir / "control_positive.fasta"
-        positive.write_text(
-            f">A|protein|empty\n{positive_sequence}\n>B|protein|empty\n{target_seq}\n"
-        )
+        positive = out_dir / "control_positive.yaml"
+        positive.write_text(_boltz_yaml(
+            [("A", positive_sequence), ("B", target_seq)], msa
+        ))
         paths["positive"] = positive
     return paths
