@@ -156,11 +156,22 @@ probe boltz2 python "Checking Boltz-2 CUDA/GPU compatibility" -c "$TORCH_PROBE" 
 #   2. the import succeeding but the kernel erroring on first forward pass.
 # So the probe loads the ops package AND calls the kernel on a real tensor.
 # Separates "cannot load" from "loads but cannot execute", the same split the
-# OpenFold probe makes. Shapes and dtypes follow the upstream docstring's own
-# example: x is (batch, seq, seq, hidden) float32, mask is (batch, seq, seq)
-# FLOAT (1 = valid, 0 = masked, not bool), and hidden_dim must be a multiple
-# of 32 -- a documented limitation. Weights are left at their Optional None
-# defaults, as that example does.
+# OpenFold probe makes.
+#
+# THE WEIGHTS ARE LOAD-BEARING. An earlier version left them at their Optional
+# None defaults, as the upstream docstring example does, and PASSED on an image
+# that then died mid-prediction with "Failed to find C compiler". With no
+# norm weights the fused layer-norm path is skipped, so no triton kernel is
+# ever launched, so triton never JIT-compiles its `cuda_utils` extension and
+# never needs a compiler. Passing real weights -- exactly the set
+# boltz/model/layers/triangular_mult.py:23 passes -- is what exercises
+# fused_layer_norm_torch -> triton jit -> driver init.
+#
+# Shapes come from boltz's own module definition (triangular_mult.py:53-59):
+# norm_* are LayerNorm(dim) so (dim,); p_in/g_in are Linear(dim, 2*dim) so
+# (2*dim, dim); p_out/g_out are Linear(dim, dim). dim must be a multiple of 32
+# (documented limitation); 128 is boltz's default. x is (batch, seq, seq, dim)
+# float32 and mask is (batch, seq, seq) FLOAT -- 1 = valid, not bool.
 readonly CUEQ_PROBE='
 import sys, torch
 try:
@@ -170,16 +181,26 @@ except Exception as e:
 
 from cuequivariance_torch import triangle_multiplicative_update
 
-n, d = 32, 32
-x = torch.randn(1, n, n, d, device="cuda")
-mask = torch.ones(1, n, n, device="cuda")
+n, d = 32, 128
+dev = "cuda"
+x = torch.randn(1, n, n, d, device=dev)
+mask = torch.ones(1, n, n, device=dev)
+vec = lambda: torch.randn(d, device=dev)
+mat = lambda o: torch.randn(o, d, device=dev)
 try:
-    out = triangle_multiplicative_update(x, direction="outgoing", mask=mask)
+    out = triangle_multiplicative_update(
+        x, direction="outgoing", mask=mask,
+        norm_in_weight=vec(), norm_in_bias=vec(),
+        p_in_weight=mat(2 * d), g_in_weight=mat(2 * d),
+        norm_out_weight=vec(), norm_out_bias=vec(),
+        p_out_weight=mat(d), g_out_weight=mat(d),
+        eps=1e-5,
+    )
     torch.cuda.synchronize()
 except Exception as e:
     sys.exit(f"cuEquivariance kernel loaded but FAILED to execute: {type(e).__name__}: {e}")
-print(f"OK: cuEquivariance triangle kernel executed, out={tuple(out.shape)} "
-      f"| cuBLAS >= 12.5 satisfied | CUDA v{torch.version.cuda}")'
+print(f"OK: cuEquivariance triangle kernel executed (fused layer norm + triton JIT), "
+      f"out={tuple(out.shape)} | cuBLAS >= 12.5 satisfied | CUDA v{torch.version.cuda}")'
 
 probe boltz2 python "Checking Boltz-2 cuEquivariance triangle kernels" -c "$CUEQ_PROBE" \
 || log_fatal "Boltz-2 cuEquivariance kernels unusable on this host.
