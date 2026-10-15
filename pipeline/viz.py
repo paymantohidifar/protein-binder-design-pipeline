@@ -19,6 +19,12 @@ TARGET_COLOUR = "lightgrey"
 HOTSPOT_COLOUR = "darkred"
 DESIGN_COLOUR = "cyan"
 PREDICTION_COLOUR = "magenta"
+
+PYMOL_TARGET_COLOUR = "grey80"
+PYMOL_HOTSPOT_COLOUR = "firebrick" # PyMOL's darkred
+PYMOL_DESIGN_COLOUR = "cyan"
+PYMOL_PREDICTION_COLOUR = "magenta"
+
 # Distinct colours for overlaying multiple backbones to judge binding-mode
 # diversity. Chosen to stay distinguishable against grey and in both themes.
 BACKBONE_PALETTE = [
@@ -37,9 +43,14 @@ def _view(width: int = 800, height: int = 520):
     return py3Dmol.view(width=width, height=height)
 
 
-def _resi_selector(labels: list[str]) -> str:
-    """'A59','A83' -> '59,83' for py3Dmol's resi selector."""
+def _resi_selector(labels: list[str]) -> list[str]:
+    """'A59','A83' -> ['59','83'] for py3Dmol's resi selector."""
     return [str(pdb_io.parse_label(lab)[1]) for lab in labels]
+
+
+def _pymol_resi_selector(labels: list[str]) -> str:
+    """'A59','A83' -> '59+83' for PyMOL's resi selector."""
+    return "+".join(str(pdb_io.parse_label(lab)[1]) for lab in labels)
 
 
 # --- Checkpoint 1: hotspot selection ---------------------------------------
@@ -71,7 +82,6 @@ def show_target_hotspots(
             {"chain": chain, "resi": str(resnum), "atom": "CA"},
         )
     if surface:
-        # Opacity below ~0.7 makes the hotspot sticks hard to read through.
         view.addSurface("VDW", {"opacity": 0.65, "color": TARGET_COLOUR}, {"chain": chain})
     view.zoomTo()
     return view
@@ -89,11 +99,6 @@ def _superpose_onto_design(
 
     Needed because RFdiffusion recentres: the designs put their target copy at
     the origin, while the input target sits wherever the crystal left it.
-
-    Residues are paired positionally -- valid because the target is held fixed,
-    so the design's copy is the same residues in the same order. A count
-    mismatch raises rather than superposing on whatever happens to line up: a
-    silently misplaced target would make binding modes look wrong.
     """
     from . import metrics
 
@@ -156,11 +161,10 @@ def show_backbone_ensemble(
 
     `target_chain` / `binder_chain` are the chains *inside each design*.
 
-    `hotspots` are labels in the ORIGINAL target numbering (e.g. `A59`) when
-    `target_pdb` is given, since that file keeps the original numbers. Without
-    `target_pdb` the first design's own target copy is used as the reference,
-    and the labels are renumbered through its .trb -- so pass original
-    numbering either way.
+    `hotspots` are labels in the ORIGINAL target numbering when `target_pdb` is given, 
+    since that file keeps the original numbers. Without `target_pdb` the first design's 
+    own target copy is used as the reference, and the labels are renumbered through its 
+    .trb -- so pass original numbering either way.
     """
     if not design_pdbs:
         raise ValueError("no design PDBs to render")
@@ -289,18 +293,18 @@ def write_pml_hotspots(
     target_pdb: str | Path, labels: list[str], out_path: str | Path, chain: str = "A"
 ) -> Path:
     """PyMOL scene for the hotspot checkpoint."""
-    resi = "+".join(str(pdb_io.parse_label(lab)[1]) for lab in labels)
+    resi = _pymol_resi_selector(labels)
     script = f"""\
 # Hotspot selection checkpoint
 load {Path(target_pdb).resolve()}, target
 hide everything
 show surface, target
 show cartoon, target
-color grey80, target
+color {PYMOL_TARGET_COLOUR}, target
 set transparency, 0.65, target
 select hotspots, target and chain {chain} and resi {resi}
 show sticks, hotspots
-color red, hotspots
+color {PYMOL_HOTSPOT_COLOUR}, hotspots
 set label_size, 16
 set label_color, white
 label hotspots and name CA, "%s%s" % (resi, resn)
@@ -330,8 +334,8 @@ load {Path(design_pdb).resolve()}, design
 load {Path(predicted_pdb).resolve()}, predicted
 hide everything
 show cartoon, design or predicted
-color cyan, design
-color magenta, predicted
+color {PYMOL_DESIGN_COLOUR}, design
+color {PYMOL_PREDICTION_COLOUR}, predicted
 # cycles=0 disables outlier rejection, for comparability with scRMSD
 align predicted, design and chain {binder_chain}, cycles=0
 orient design
@@ -357,7 +361,7 @@ def write_pml_interface(
 load {Path(complex_pdb).resolve()}, complex
 hide everything
 show cartoon, complex
-color grey80, chain {target_chain}
+color {PYMOL_TARGET_COLOUR}, chain {target_chain}
 spectrum b, red_yellow_green_blue, chain {binder_chain}, minimum=50, maximum=90
 select interface, byres (chain {binder_chain} within 5 of chain {target_chain})
 select interface_target, byres (chain {target_chain} within 5 of chain {binder_chain})
