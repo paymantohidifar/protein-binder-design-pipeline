@@ -286,15 +286,30 @@ def _atom_fullname(name: str) -> str:
     return name if len(name) >= 4 else f" {name:<3s}"
 
 
-def write_pdb(chains: list[Chain], path: str | Path) -> Path:
-    """Write chains out through Bio.PDB's PDBIO.
+def _element_for(name: str) -> str:
+    """Element symbol from a PDB atom name.
 
-    Delegated rather than formatted by hand so the column layout -- atom-name
-    justification above all -- is the library's problem.
+    The first alphabetic character, not the first character: hydrogens carry a
+    leading branch digit ("3HB", "1HD2"), for which name[0] yields "3" and
+    Bio.PDB warns and falls back to guessing on every re-read. Correct for
+    protein atoms; it would be wrong for a two-letter element such as CA
+    (calcium), which this pipeline never writes.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    return next((ch for ch in name if ch.isalpha()), "C")
 
+
+def to_bio_model(chains: list[Chain]) -> BioModel:
+    """Rebuild a Bio.PDB model from pipeline Chains, in the order given.
+
+    Exists so analyses that need Biopython's structure algorithms can run on a
+    Chain already in memory, without a round trip through a file. Used by
+    write_pdb and by hotspots' SASA, which must be computable for a Chain that
+    has no file of its own -- a `subset()` or `renumber()` result.
+
+    Chain ids are the round-tripped file ids, so a blank id comes back as the
+    single space Bio.PDB uses. Address the result positionally rather than by
+    id if that distinction matters.
+    """
     bio_structure = BioStructure("out")
     bio_model = BioModel(0)
     bio_structure.add(bio_model)
@@ -319,17 +334,29 @@ def write_pdb(chains: list[Chain], path: str | Path) -> Path:
                         altloc=" ",
                         fullname=_atom_fullname(name),
                         serial_number=serial,
-                        # First character of the atom name. Correct for protein
-                        # atoms (N, CA, C, O, CB -> N, C, C, O, C); it would be
-                        # wrong for metals such as CA (calcium), which this
-                        # pipeline never writes.
-                        element=name[0],
+                        element=_element_for(name),
                     )
                 )
                 serial += 1
 
+    return bio_model
+
+
+def write_pdb(chains: list[Chain], path: str | Path) -> Path:
+    """Write chains out through Bio.PDB's PDBIO.
+
+    Delegated rather than formatted by hand so the column layout -- atom-name
+    justification above all -- is the library's problem.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    bio_model = to_bio_model(chains)
+
     io = PDBIO()
-    io.set_structure(bio_structure)
+    # The parent Structure, not the model: PDBIO writes MODEL records only when
+    # handed a structure, and a bare model would lose them.
+    io.set_structure(bio_model.get_parent())
     io.save(str(path))
     return path
 
