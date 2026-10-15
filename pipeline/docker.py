@@ -10,9 +10,10 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from pipeline import runlog
 
 
 class ContainerError(RuntimeError):
@@ -20,14 +21,27 @@ class ContainerError(RuntimeError):
 
     Captures container execution failures, printing the exact image name, return code,
     executed command, and the final tail lines of stdout/stderr for immediate debugging.
+
+    The tail is only the last few lines; `transcript` points at the full output
+    on disk, so the message says where to look rather than reproducing it.
     """
 
-    def __init__(self, image: str, returncode: int, command: str, tail: str):
+    def __init__(
+        self,
+        image: str,
+        returncode: int,
+        command: str,
+        tail: str,
+        transcript: Path | None = None,
+    ):
         self.image = image
         self.returncode = returncode
         self.tail = tail
+        self.transcript = transcript
+        where = f"\n  full log: {transcript}" if transcript else ""
         super().__init__(
-            f"{image} exited {returncode}\n  command: {command}\n  last output:\n{tail}"
+            f"{image} exited {returncode}\n  command: {command}{where}"
+            f"\n  last output:\n{tail}"
         )
 
 
@@ -126,53 +140,85 @@ class ContainerRun:
 def run(
     spec: ContainerRun,
     dry_run: bool = False,
-    stream: bool = True,
+    stream: bool = False,
     tail_lines: int = 40,
+    label: str | None = None,
 ) -> str:
     """Execute a container, returning its combined output.
 
     With dry_run=True the command is printed and not executed -- which is how
     the notebook is validated on a machine with no GPU.
-    Streams logs line-by-line in real time to standard stdout while accumulating full terminal history.
-    If the container exits non-zero, raises `ContainerError` containing error log tail.
+
+    Container output goes to a per-run transcript under `runlog.log_dir()`,
+    written and flushed line by line, while the caller sees only a start line
+    and a one-line result. `stream=True` additionally echoes every line to
+    stdout, retained for debugging a stage interactively, but off by default not
+    to clutter notebook output cells or bloat .ipynb commit.
+    
+    `label` distinguishes two runs of the same image in the transcript
+    filename, e.g. the two ProteinMPNN helper scripts.
+
+    If the container exits non-zero, raises `ContainerError` whose tail is read
+    back from the transcript, and names the transcript path.
     """
     command = spec.as_shell()
+    log = runlog.logger("docker")
     if dry_run:
+        # Printed as well as logged. A dry run must create nothing -- not even
+        # a log directory -- so this path never calls configure(); printing is
+        # what keeps it visible when nothing else has. The log line is the
+        # record of what the campaign WOULD have executed, and diffing two of
+        # those catches config drift.
         print(f"[dry-run] {command}")
+        log.info(f"[dry-run] {command}")
         return ""
 
-    print(f"[run] {spec.image}: {shlex.join(spec.command)}", flush=True)
+    # Lazy: a caller that never configured logging still gets a transcript,
+    # under the default directory, rather than silently losing the output.
+    runlog.configure()
+    transcript = runlog.transcript_path(spec.image, label)
+    log.info(f"[run] {spec.image}: {shlex.join(spec.command)}")
+    log.info(f"      log -> {transcript}")
 
-    # Launch container process with unbuffered line streaming
-    # Note: while subprocess.run() wait for a command to finish before returning 
-    # control to the script, Popen() opens a process asynchronously in the 
-    # background and gives user a process object (proc) to interact with while it runs.
-    proc = subprocess.Popen(
-        spec.argv(),            # Array of command arguments: ["docker", "run", ...]
-        stdout=subprocess.PIPE, # Intercept standard output
-        stderr=subprocess.STDOUT,# Redirect standard error into standard output
-        text=True,              # Decode output streams as UTF-8 text strings (not bytes)
-        bufsize=1,              # Line-buffered output for immediate real-time streaming
-        )
-    lines: list[str] = []
-    assert proc.stdout is not None
+    with runlog.RunLog(
+        image=spec.image, path=transcript, command=command, echo=stream
+    ) as sink:
+        # Note: while subprocess.run() waits for a command to finish before
+        # returning control to the script, Popen() opens a process
+        # asynchronously in the background and gives the caller a process
+        # object (proc) to interact with while it runs -- which is what lets
+        # the transcript be written as the run proceeds instead of at the end.
+        proc = subprocess.Popen(
+            spec.argv(),             # Array of command arguments: ["docker", "run", ...]
+            stdout=subprocess.PIPE,  # Intercept standard output
+            stderr=subprocess.STDOUT,# Redirect standard error into standard output
+            text=True,               # Decode output streams as UTF-8 text strings (not bytes)
+            bufsize=1,               # Line-buffered output for immediate real-time streaming
+            )
+        lines: list[str] = []
+        assert proc.stdout is not None
 
-    # Stream container logs live to host stdout while saving lines to array
-    for line in proc.stdout:
-        lines.append(line)
-        if stream:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+        # Drain the pipe line by line. Reading to the end before wait() avoids
+        # the deadlock a full pipe buffer would cause on a chatty stage.
+        for line in proc.stdout:
+            lines.append(line)
+            sink.write(line)
 
-    returncode = proc.wait()
+        returncode = proc.wait()
+        tail = sink.tail(tail_lines)
+        elapsed = sink.elapsed
 
     output = "".join(lines)
 
     # Raise exception if container failed, formatting tail logs
     if returncode != 0:
-        raise ContainerError(
-            spec.image, returncode, command, "".join(lines[-tail_lines:])
+        log.error(
+            f"[fail] {spec.image} exited {returncode} after {elapsed:.1f}s"
+            f" -- full log: {transcript}"
         )
+        raise ContainerError(spec.image, returncode, command, tail, transcript)
+
+    log.info(f"[done] {spec.image} in {elapsed:.1f}s ({sink.lines_written} log lines)")
     return output
 
 
@@ -188,12 +234,9 @@ def gpu_available() -> bool:
 def check_gpu_compatibility(image: str) -> dict:
     """Verify the image's CUDA build actually supports the host GPU.
 
-    The failure this exists to catch: RFdiffusion's official container pins
-    PyTorch 1.12 / CUDA 11.x, which has no sm_90 kernels, so it cannot run on an
-    H100. PyTorch reports this as "no kernel image is available for execution"
-    only once a tensor reaches the GPU -- which can be minutes into a design
-    run. Allocating one tensor up front turns that into an immediate, legible
-    failure.
+    The failure this exists to catch "no kernel image is available for execution"
+    if a compatible kernel is absent. Allocating one tensor up front turns that into 
+    an immediate, legible failure.
     """
     # Probe script: checks compute capability and forces a dummy tensor allocation onto GPU memory
     probe = (
@@ -203,8 +246,6 @@ def check_gpu_compatibility(image: str) -> dict:
         "print(f'OK {torch.cuda.get_device_name(0)} sm_{cap[0]}{cap[1]} "
         "torch={torch.__version__} cuda={torch.version.cuda}')"
     )
-    # entrypoint="python" is essential: without it these args land as hydra
-    # arguments to run_inference.py and the probe never executes.
     spec = ContainerRun(
         image=image,
         command=["-c", probe],
@@ -212,7 +253,7 @@ def check_gpu_compatibility(image: str) -> dict:
         map_user=False,  # Run probe as container user to avoid permission conflicts on probe
     )
     try:
-        output = run(spec, stream=False)
+        output = run(spec, stream=False, label="gpu-probe")
     except ContainerError as exc:
         return {"image": image, "ok": False, "detail": exc.tail.strip()}
     return {
