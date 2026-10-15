@@ -1,4 +1,4 @@
-"""Hotspot candidate selection for target preparation."""
+"""Hotspot candidate selection/evalutation for target preparation."""
 
 from __future__ import annotations
 
@@ -23,76 +23,34 @@ MAX_ASA = {
     "SER": 155.0, "THR": 172.0, "TRP": 285.0, "TYR": 263.0, "VAL": 174.0,
 }
 
-# Relative-SASA floor for calling a residue surface-exposed. 0.20-0.25 is the
-# conventional band; 0.20 keeps the published hotspot A59 (0.187 relative,
-# borderline) within reach of the shortlist rather than discarding it.
+# Relative-SASA floor for calling a residue surface-exposed.
 EXPOSURE_FLOOR = 0.15
 
-# Residues whose side chains dominate protein-protein interfaces. These drive
-# the ranking rather than merely breaking ties -- see RANKING below.
+# Residues whose side chains dominate protein-protein interfaces.
 INTERFACE_ENRICHED = frozenset({"TRP", "TYR", "PHE", "LEU", "ILE", "MET", "ARG", "PRO"})
 
-NEIGHBOUR_RADIUS = 10.0
-
-# Measured on the campaign target (insulin_target.pdb, chain A): neighbour
-# counts run 7-28, median 16. The published hotspots A59/A83/A91 are all PHE at
-# 16/18/18 -- at or just above the median, NOT in the exposed tail.
-#
-# Two consequences, both learned from that measurement:
-#
-# 1. A cutoff of 16 excludes A83 and A91, i.e. it discards known-good hotspots.
-#    20 (the 75th percentile) retains all three while still dropping the buried
-#    core.
-# 2. Ranking by maximum exposure is the wrong objective. Interface hotspots are
-#    exposed *hydrophobics* sitting mid-band; the most-exposed tail is flexible
-#    loops and chain termini, which make poor binding sites. So residue identity
-#    leads the sort and exposure only orders within identity class.
-BURIAL_CUTOFF = 20
-
-# The RFdiffusion definition, per the paper and confirmed by the user:
-#
-#   "a hotspot [is] a residue on the target protein which is within 10A Cbeta
-#    distance of the binder"
-#
-# So the 10 A is measured target-residue-to-BINDER-residue. Two consequences:
-#
-#   - Deriving hotspots from a known complex: measurable directly, because the
-#     partner exists. See contacts_from_complex().
-#   - Designing de novo: the binder does not exist yet, so 10 A is a
-#     conditioning target rather than an input filter -- a property the OUTPUT
-#     should have. See verify_hotspot_contacts(), which checks whether
-#     RFdiffusion actually honoured it.
-HOTSPOT_CONTACT_DISTANCE = 10.0
-
-# NOT from the MANIFEST and not from the paper -- an extra sanity check added
-# here. The paper's 10 A says nothing about how far apart hotspots may be, so
-# select_patch needs some spread limit to avoid proposing residues on opposite
-# faces of the target. 15 A suits a 3-6 residue epitope engaged by a 70-100 aa
-# binder. Measured justification for not reusing 10 A: the published set
-# A59/A83/A91 spans 10.44 A, so a 10 A spread limit would reject the known-good
-# answer in examples/design_ppi.sh.
-MAX_PATCH_DISTANCE = 15.0
+NEIGHBOUR_RADIUS = 10.0 # Radius of patch formed by neighboring candidate residues
+BURIAL_CUTOFF = 20  
+HOTSPOT_CONTACT_DISTANCE = 10.0 # Acceptable distance between Cb of target and binder (in Angstrum)
+MAX_PATCH_DISTANCE = 15.0 # in Angstrum
 
 
 @dataclass
 class HotspotCandidate:
     residue_id: int
     residue_name: str
-    # Relative SASA (fraction of this residue type's theoretical maximum).
-    exposure: float
+    exposure: float # Relative SASA (fraction of this residue type's theoretical maximum).
     interface_enriched: bool
-    # Contact number: Cb neighbours within NEIGHBOUR_RADIUS. A packing
-    # descriptor, NOT accessibility -- exposure above carries that.
+    # Meaning depends on the producer: rank_candidates writes the Cb burial
+    # count, contacts_from_complex the partner-contact count. Both are
+    # neighbour counts within HOTSPOT_CONTACT_DISTANCE, of different things.
     neighbours: int = 0
-    # Absolute SASA in A^2, kept alongside the fraction for reporting.
-    sasa: float = float("nan")
+    sasa: float = float("nan") # Absolute SASA in A^2, kept alongside the fraction for reporting.
+    _chain: str = "A"
 
     @property
     def label(self) -> str:
-        """RFdiffusion's ppi.hotspot_res format, e.g. 'A59'."""
         return f"{self._chain}{self.residue_id}"
-
-    _chain: str = "A"
 
 
 def _cb_array(chain: Chain) -> tuple[np.ndarray, list[int], list[str]]:
@@ -108,8 +66,7 @@ def compute_sasa(
 ) -> dict[int, float]:
     """Per-residue solvent-accessible surface area in A^2, via Shrake-Rupley.
 
-    Takes a path rather than a pdb_io.Chain because Bio.PDB.SASA operates on
-    Biopython entities. SASA is computed on the whole model, not the isolated
+    SASA is computed on the whole model, not the isolated
     chain, so a residue buried by a partner chain reads as buried -- which is
     the physically meaningful answer for a complex.
     """
@@ -140,11 +97,54 @@ def relative_sasa(
         structure = PDBParser(QUIET=True).get_structure("target", str(pdb_path))
         model = next(iter(structure))
         names = {r.id[1]: r.get_resname() for r in model[chain_id] if r.id[0] == " "}
+    return _as_fraction(absolute, names)
+
+
+def _as_fraction(
+    absolute: dict[int, float], names: dict[int, str]
+) -> dict[int, float]:
+    """Divide absolute SASA by the residue type's theoretical maximum.
+
+    Residues whose type has no reference maximum (non-standard) are omitted
+    rather than given a wrong denominator.
+    """
     return {
         rid: value / MAX_ASA[names[rid]]
         for rid, value in absolute.items()
         if names.get(rid) in MAX_ASA
     }
+
+
+def chain_sasa(chain: Chain, context: list[Chain] | None = None) -> dict[int, float]:
+    """Per-residue SASA in A^2 for a Chain already in memory.
+
+    The in-memory counterpart of compute_sasa, for a Chain that may have no
+    file of its own. `context` adds further chains to the model, so a residue
+    buried by a partner reads as buried; with no context the chain is treated
+    as isolated, which gives *unbound* exposure.
+
+    That default is deliberate for hotspot work. A good epitope residue is one
+    a binder could reach on the free target, so the question is how exposed it
+    is before anything binds -- in a complex those same residues read as
+    buried, which would rank the real interface last.
+    """
+    model = pdb_io.to_bio_model([chain, *(context or [])])
+    ShrakeRupley().compute(model, level="R")
+    # Positionally: to_bio_model round-trips a blank chain id to a space, so
+    # the id is not a reliable key here. `chain` was passed first.
+    return {
+        residue.id[1]: float(residue.sasa)
+        for residue in next(iter(model))
+        if residue.id[0] == " "
+    }
+
+
+def chain_relative_sasa(
+    chain: Chain, context: list[Chain] | None = None
+) -> dict[int, float]:
+    """chain_sasa as a fraction of each residue type's theoretical maximum."""
+    names = {r.seq_id: r.name for r in chain.residues}
+    return _as_fraction(chain_sasa(chain, context), names)
 
 
 def neighbour_counts(chain: Chain, radius: float = NEIGHBOUR_RADIUS) -> dict[int, int]:
@@ -159,29 +159,40 @@ def rank_candidates(
     chain: Chain,
     radius: float = NEIGHBOUR_RADIUS,
     burial_cutoff: int = BURIAL_CUTOFF,
+    exposure_floor: float = EXPOSURE_FLOOR,
 ) -> list[HotspotCandidate]:
     """Shortlist non-buried residues, best hotspot candidates first.
 
-    Sorted by interface-enriched identity first, then exposure within that
-    class. This is a shortlist for the visual check MANIFEST Section 1 calls
-    for, not an oracle -- epitope choice is a judgement call, and the ranking
-    only puts plausible residues in front of the reviewer.
+    Sorted by interface-enriched identity first, then relative SASA within
+    that class. Epitope choice is a judgement call, and the ranking only puts
+    plausible residues in front of the reviewer.
+
+    Two independent exposure filters, because they fail differently: the Cb
+    neighbour count (`burial_cutoff`) measures local packing density and is
+    blind to residue size and side-chain direction, while relative SASA
+    (`exposure_floor`) is per-residue-type normalised and absolute -- 0.15
+    means the same thing on any target, where a neighbour count does not.
+    Ranking uses relative SASA alone.
     """
     coords, ids, names = _cb_array(chain)
     counts = neighbour_counts(chain, radius)
-    max_count = max(counts.values()) or 1
+    absolute = chain_sasa(chain)
+    relative = chain_relative_sasa(chain)
 
     candidates = [
         HotspotCandidate(
             residue_id=rid,
             residue_name=name,
             neighbours=counts[rid],
-            exposure=1.0 - counts[rid] / max_count,
+            exposure=relative[rid],
+            sasa=absolute[rid],
             interface_enriched=name in INTERFACE_ENRICHED,
             _chain=chain.chain_id,
         )
         for rid, name in zip(ids, names)
-        if counts[rid] <= burial_cutoff
+        # A residue absent from `relative` is non-standard, so it has no
+        # reference maximum and no meaningful exposure to rank on.
+        if counts[rid] <= burial_cutoff and relative.get(rid, 0.0) >= exposure_floor
     ]
     candidates.sort(key=lambda c: (not c.interface_enriched, -c.exposure, c.residue_id))
     return candidates
@@ -193,24 +204,22 @@ def select_patch(
     max_cb_distance: float = MAX_PATCH_DISTANCE,
     radius: float = NEIGHBOUR_RADIUS,
     burial_cutoff: int = BURIAL_CUTOFF,
+    exposure_floor: float = EXPOSURE_FLOOR,
 ) -> list[HotspotCandidate]:
     """Pick `n` mutually close, non-buried residues forming one epitope patch.
 
     Greedy: seed on the top-ranked candidate, then add the next-best candidate
     still within `max_cb_distance` of every member already chosen, so the patch
     describes one site a single binder can engage.
-
-    See MAX_PATCH_DISTANCE on why the default is 15 A rather than the 10 A in
-    MANIFEST Section 1.
     """
     if not 3 <= n <= 6:
-        raise ValueError(f"MANIFEST specifies 3-6 hotspots, got {n}")
+        raise ValueError(f"RFdiffusion recommends 3-6 hotspots, got {n}")
 
-    candidates = rank_candidates(chain, radius, burial_cutoff)
+    candidates = rank_candidates(chain, radius, burial_cutoff, exposure_floor)
     if len(candidates) < n:
         raise ValueError(
             f"only {len(candidates)} exposed residues at burial_cutoff="
-            f"{burial_cutoff}; relax the cutoff"
+            f"{burial_cutoff}, exposure_floor={exposure_floor}; relax either"
         )
 
     cb = {r.seq_id: r.cb for r in chain.residues if r.cb is not None}
@@ -254,24 +263,29 @@ def contacts_from_complex(
     first, since a residue contacting many partner residues sits deeper in the
     interface.
 
-    Does not apply to a bare target such as insulin_target.pdb (single chain,
-    no partner) -- there the binder does not exist and hotspots must come from
-    prior knowledge. Use verify_hotspot_contacts() after design instead.
+    Does not apply to a bare target (single chain, no partner) -- there the binder 
+    does not exist and hotspots must come from prior knowledge. 
+    Use verify_hotspot_contacts() after design instead.
     """
     t_coords, t_ids, t_names = _cb_array(target)
     p_coords, _, _ = _cb_array(partner)
 
     d = np.linalg.norm(t_coords[:, None, :] - p_coords[None, :, :], axis=-1)
     contact_counts = (d <= cutoff).sum(axis=1)
-    burial = neighbour_counts(target)
-    max_burial = max(burial.values()) or 1
+    # Unbound exposure: the target alone, with the partner left out of the SASA
+    # model on purpose. Every residue reported here is by definition near the
+    # partner, so in-complex SASA would read ~0 for exactly the residues that
+    # matter and the number would carry no information.
+    absolute = chain_sasa(target)
+    relative = chain_relative_sasa(target)
 
     candidates = [
         HotspotCandidate(
             residue_id=rid,
             residue_name=name,
             neighbours=int(count),
-            exposure=1.0 - burial[rid] / max_burial,
+            exposure=relative.get(rid, float("nan")),
+            sasa=absolute[rid],
             interface_enriched=name in INTERFACE_ENRICHED,
             _chain=target.chain_id,
         )
@@ -291,11 +305,10 @@ def verify_hotspot_contacts(
 ) -> dict:
     """Did the generated binder actually engage the hotspots it was given?
 
-    Step 1 QC that the MANIFEST does not currently specify. Because a hotspot is
-    defined as a target residue within `cutoff` Cb of the binder, the definition
-    becomes checkable once RFdiffusion has produced a binder -- and a design
-    whose binder never comes within 10 A of a requested hotspot has ignored its
-    conditioning, regardless of how good its scRMSD later looks.
+    Because a hotspot is defined as a target residue within `cutoff` Cb of the 
+    binder, the definition becomes checkable once RFdiffusion has produced a 
+    binder -- and a design whose binder never comes within 10 A of a requested 
+    hotspot has ignored its conditioning, regardless of how good its scRMSD later looks.
 
     Cheap enough to run on every backbone, and it catches a silently
     mis-specified hotspot string (wrong chain, wrong numbering) immediately
@@ -373,8 +386,7 @@ def patch_distances(chain: Chain, labels: list[str]) -> np.ndarray:
     """Pairwise Cb-Cb distances for an explicit hotspot set, e.g. ['A59','A83'].
 
     Used to verify a hand-specified set really forms one patch before spending
-    GPU time on it. Note this is the spread among hotspots, which the paper's
-    10 A definition says nothing about -- compare MAX_PATCH_DISTANCE.
+    GPU time on it. Note this is the spread among hotspots.
     """
     coords = _labelled_cb(chain, labels)
     return np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
