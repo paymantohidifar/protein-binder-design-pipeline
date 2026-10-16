@@ -1,15 +1,11 @@
 # Single source of truth for the binder design campaign.
 #
 # Both the prototype notebook and the production Snakefile read this file, so
-# porting to SnakeMake is a translation of the execution graph, not a rewrite of
-# the parameters. Nothing downstream should hardcode a threshold.
+# porting to SnakeMake is a translation of the execution graph.
 
 campaign:
   name: insulin_receptor_binders
-  # Flip to false for the full campaign. Smoke mode shrinks the pipeline and
-  # records metrics without enforcing gates, so a plumbing bug surfaces as a
-  # NaN column rather than as an empty result set.
-  smoke_test: true
+  smoke_test: true # Flip to false for the full campaign.
 
 target:
   pdb: inputs/pdbs/insulin_target.pdb
@@ -22,24 +18,16 @@ rfdiffusion:
   contigs: "[A1-150/0 70-100]"
   checkpoint: Complex_base_ckpt.pt
   num_designs:
-    smoke: 5
-    full: 1000
-  # Noise 0 improves design quality for PPI
-  noise_scale_ca: 0
+    smoke: 5        # Minimal prototyping batch
+    full: 1000      # Production-scale trajectory count
+  noise_scale_ca: 0 # Deterministic ODE denoising for tight PPI packing 
   noise_scale_frame: 0
   write_trajectory:
     smoke: true
     full: false
-  # A hotspot is defined as a target residue within 10 A Cb of the binder, 
-  # so once a binder exists the conditioning becomes checkable. A design whose 
-  # binder never reaches a requested hotspot ignored its conditioning and should 
-  # not consume Step 2+ compute, however good it looks geometrically. Also catches a 
-  # mis-specified hotspot string (wrong chain or numbering) on design 1 instead of after the
-  # whole funnel has run.
   verify_hotspot_contacts: true
-  hotspot_contact_distance: 10.0
-  # Require all hotspots engaged. Drop to 2 to allow partial engagement.
-  min_hotspots_engaged: 3
+  hotspot_contact_distance: 10.0 # Cβ–Cβ distance threshold (Å)
+  min_hotspots_engaged: 3        # Require all hotspots engaged. Drop to 2 to allow partial engagement.
 
 # --- Step 2: ProteinMPNN -----------------------------------------------------
 proteinmpnn:
@@ -47,37 +35,39 @@ proteinmpnn:
     smoke: 2
     full: 8
   sampling_temperature: 0.1
-  # SolubleMPNN penalises surface hydrophobics; preferred for binders that must
-  # express and stay soluble.
-  use_soluble_weights: true
+  use_soluble_weights: true # SolubleMPNN model penalises surface hydrophobics; preferred for binders that must
+                            # express and stay soluble.
   expected_binder_chain: A
   expected_target_chain: B
   design_chains: [A]
   fixed_chains: [B]
 
 # --- Step 3: Monomer self-consistency ---------------------------------------
-# Thresholds roughly match Bennett et al. 2023. 
+# Note: Thresholds roughly match Bennett et al. 2023. 
 gates:
+  step2_proteinmpnn:
+    mpnn_score_max: 1.25
+    mpnn_score_preferred_max: 1.10
+    mpnn_score_marginal_max: 1.35
   step3a_esmfold:
     plddt_min: 80.0
-    scrmsd_max: 2.0        # was 1.5
+    scrmsd_max: 2.0        
     expected_pass_rate: [0.15, 0.20]
   step3b_boltz2:
     plddt_min: 85.0
-    scrmsd_max: 1.5        # was 1.2
+    scrmsd_max: 1.5        
     expected_pass_rate: [0.05, 0.10]
   step4_complex:
-    # Primary discriminator. Less saturating than ipTM on de novo binders.
     pae_interaction_max: 10.0
-    iptm_min: 0.70         # was 0.80, demoted to secondary
+    iptm_min: 0.70
     binder_rmsd_to_design_max: 2.0
 
 # --- Step 4: Complex validation ---------------------------------------------
 step4:
-  # Both engines run so their outputs can be compared, per MANIFEST Section 5.
-  engines: [boltz2, colabfold]
+  # Both engines run so their outputs can be compared.
   # single_sequence is the genuinely database-free path. MSA mode sends target
   # sequences to a public third-party server -- opt in deliberately.
+  engines: [boltz2, colabfold]
   boltz2_msa_mode: single_sequence
   colabfold_msa_mode: mmseqs2_api
   colabfold_model_type: alphafold2_multimer_v3
@@ -118,6 +108,9 @@ paths:
   boltz2_monomer: results/03b_boltz2
   complexes: results/04_complexes
   summary: results/final_leads_summary.csv
+  # Container transcripts and the campaign timeline. One file per docker run
+  # plus pipeline.log; override per-instance with $BINDER_LOG_DIR.
+  logs: results/logs
 
 # --- Containers --------------------------------------------------------------
 containers:
