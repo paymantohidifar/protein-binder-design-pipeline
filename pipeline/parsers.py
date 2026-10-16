@@ -1,9 +1,6 @@
 """Predictor output -> one flat per-candidate record.
 
-IMPORTANT: the file layouts and JSON keys below are written from documented
-upstream formats, NOT verified against real output on this machine -- none of
-these tools are installed here. Output schemas drift between versions, so every
-parser:
+Every parser:
 
   - globs over several candidate filename patterns rather than one,
   - reports what it DID find when a lookup fails, so a schema change is a
@@ -77,12 +74,8 @@ def plddt_from_pdb(path: str | Path, chain_id: str | None = None) -> np.ndarray:
     # Two ways the column can be absent. Bio.PDB defaults a missing B-factor to
     # 0.0 rather than None, so a file carrying no pLDDT yields all zeros, not
     # all NaN. Both must raise: a silent 0.0 would be read as a confident
-    # prediction that failed the gate, when in fact nothing was predicted --
-    # exactly the parser-failure-as-design-failure confusion the funnel exists
-    # to separate.
-    #
-    # All-zero is safe to treat as absent: pLDDT is strictly positive for any
-    # real prediction, however poor.
+    # prediction that failed the gate, when in fact nothing was predicted
+    
     if values.size == 0 or np.isnan(values).all():
         raise ParseError(f"no B-factor/pLDDT column in {path}")
     if np.nanmax(values) == 0.0:
