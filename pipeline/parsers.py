@@ -149,7 +149,231 @@ class ComplexRecord:
         }
 
 
-# --- ESMFold (Step 3A) -----------------------------------------------------
+# --- ProteinMPNN (Step 2) --------------------------------------------------
+
+
+@dataclass
+class MpnnSequence:
+    """One sequence from a ProteinMPNN run.
+
+    ProteinMPNN reports its own scores in the FASTA headers, so they are read
+    rather than recomputed:
+
+      score         mean negative log-likelihood over DESIGNED positions
+      global_score  same over all positions, designed and fixed
+      seq_recovery  identity to the input sequence
+
+    Lower score is better -- it is a negative log-likelihood, not a similarity.
+    A filter written as `score > x` would select the worst sequences.
+    """
+
+    design_id: str
+    sample: int
+    sequence: str
+    chains: list[str]
+    score: float = float("nan")
+    global_score: float = float("nan")
+    seq_recovery: float = float("nan")
+    temperature: float = float("nan")
+    is_native: bool = False
+    tier: str | None = None
+
+    @property
+    def sequence_id(self) -> str:
+        return f"{self.design_id}_seq{self.sample:03d}"
+
+    def chain(self, index: int) -> str:
+        """One chain's sequence. ProteinMPNN joins chains with '/'."""
+        if index >= len(self.chains):
+            raise ParseError(
+                f"{self.sequence_id} has {len(self.chains)} chain(s), index {index} requested"
+            )
+        return self.chains[index]
+
+    def as_row(self) -> dict:
+        return {
+            "design_id": self.design_id,
+            "sequence_id": self.sequence_id,
+            "sequence": self.sequence,
+            "length": len(self.sequence.replace("/", "")),
+            "mpnn_score": self.score,
+            "mpnn_global_score": self.global_score,
+            "mpnn_seq_recovery": self.seq_recovery,
+            "mpnn_temperature": self.temperature,
+            "mpnn_tier": self.tier,
+        }
+
+
+def _parse_mpnn_header(header: str) -> dict:
+    """Pull key=value pairs out of a ProteinMPNN FASTA header.
+
+    Headers look like:
+      >design, score=1.1066, global_score=1.1066, fixed_chains=['B'], ...
+      >T=0.1, sample=1, score=0.7073, global_score=0.9001, seq_recovery=0.5170
+
+    Bracketed list values are kept as raw strings; only the numeric fields are
+    coerced, and a field that will not parse is omitted rather than guessed at.
+    """
+    fields: dict = {}
+    depth = 0
+    token = ""
+    for ch in header:
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        if ch == "," and depth == 0:
+            fields.update(_mpnn_token(token))
+            token = ""
+        else:
+            token += ch
+    fields.update(_mpnn_token(token))
+    return fields
+
+
+def _mpnn_token(token: str) -> dict:
+    token = token.strip()
+    if "=" not in token:
+        return {"_name": token} if token else {}
+    key, _, value = token.partition("=")
+    key, value = key.strip(), value.strip()
+    try:
+        return {key: float(value)}
+    except ValueError:
+        return {key: value}
+
+
+def _numeric(fields: dict, key: str) -> float:
+    """A header field as a float, NaN if absent or unparseable.
+
+    `_mpnn_token` keeps a value it cannot coerce as a raw string, so a float()
+    straight off `fields` raises ValueError mid-record on any header drift. NaN
+    instead: the downstream gates already report a NaN metric as a parser
+    failure distinct from a threshold breach, which is the legible outcome.
+    """
+    try:
+        return float(fields.get(key, float("nan")))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def parse_proteinmpnn_fasta(
+    path: str | Path, design_id: str, binder_chain_index: int = 0
+) -> tuple[MpnnSequence | None, list[MpnnSequence]]:
+    """Read a ProteinMPNN output FASTA.
+
+    Returns (native, samples). The first record is the input sequence, echoed
+    back with its own score; the rest are the sampled designs. The native is
+    returned separately so it cannot be mistaken for a design and carried into
+    Step 3.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise ParseError(f"cannot read {path}: {exc}") from exc
+
+    records: list[tuple[str, str]] = []
+    header: str | None = None
+    seq_parts: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if header is not None:
+                records.append((header, "".join(seq_parts)))
+            header, seq_parts = line[1:], []
+        else:
+            seq_parts.append(line)
+    if header is not None:
+        records.append((header, "".join(seq_parts)))
+
+    if not records:
+        raise ParseError(f"no FASTA records in {path}")
+
+    native: MpnnSequence | None = None
+    samples: list[MpnnSequence] = []
+    for position, (head, sequence) in enumerate(records):
+        fields = _parse_mpnn_header(head)
+        chains = sequence.split("/")
+        entry = MpnnSequence(
+            design_id=design_id,
+            sample=int(fields.get("sample", 0)),
+            sequence=sequence,
+            chains=chains,
+            score=_numeric(fields, "score"),
+            global_score=_numeric(fields, "global_score"),
+            seq_recovery=_numeric(fields, "seq_recovery"),
+            temperature=_numeric(fields, "T"),
+            is_native=position == 0 and "sample" not in fields,
+        )
+        if entry.is_native:
+            native = entry
+        else:
+            samples.append(entry)
+
+    if not samples:
+        raise ParseError(
+            f"{path} holds only the native sequence; ProteinMPNN produced no samples"
+        )
+    return native, samples
+
+
+def filter_mpnn_samples(
+    samples: list[MpnnSequence], thresholds: dict
+) -> tuple[list[MpnnSequence], list[tuple[MpnnSequence, str]]]:
+    """Apply the Step 2 sequence-quality gate before any GPU folding runs.
+
+    `thresholds` is the `gates.step2_proteinmpnn` block of
+    config/campaign.yaml -- the bounds are never written here. Tags every
+    sample's `.tier` (so dropped and kept rows carry the same label in the
+    summary CSV) and returns (kept, dropped), where each dropped entry is
+    paired with the reason string from `metrics.passes`.
+
+    Filtering here is the cheapest point in the funnel: ProteinMPNN's score
+    comes free in the FASTA header, while every sequence forwarded costs an
+    ESMFold and then a Boltz-2 prediction.
+
+    A sample whose score failed to parse (NaN) is tiered "unknown" and dropped,
+    like any other missing metric -- at smoke-test scale that is a header-format
+    change in `_parse_mpnn_header`, not a bad sequence, and the reason string
+    says so.
+    """
+    kept: list[MpnnSequence] = []
+    dropped: list[tuple[MpnnSequence, str]] = []
+    for sample in samples:
+        sample.tier = metrics.mpnn_tier(sample.score, thresholds)
+        ok, reasons = metrics.passes({"mpnn_score": sample.score}, thresholds)
+        if ok:
+            kept.append(sample)
+        else:
+            dropped.append((sample, "; ".join(reasons)))
+    return kept, dropped
+
+
+def binder_fasta(
+    samples: list[MpnnSequence], out_path: str | Path, binder_chain_index: int = 0
+) -> Path:
+    """Write just the binder chain of each sample, for Step 3 monomer folding.
+
+    Step 3 validates the binder in isolation, so the target chain must be
+    dropped here. Passing the full multi-chain string to ESMFold would fold the
+    complex as one concatenated sequence and every scRMSD downstream would be
+    meaningless.
+
+    Writes whatever it is given and does not gate: pass the `kept` list from
+    `filter_mpnn_samples`, or every sampled sequence folds.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as fh:
+        for sample in samples:
+            fh.write(f">{sample.sequence_id}\n{sample.chain(binder_chain_index)}\n")
+    return out_path
+
+
+# --- ESMFold -----------------------------------------------------
 
 
 def parse_esmfold(
@@ -460,176 +684,3 @@ def _binder_rmsd(
     except (ValueError, KeyError) as exc:
         notes.append(f"binder_rmsd_to_design unavailable: {exc}")
         return float("nan")
-
-
-# --- ProteinMPNN (Step 2) --------------------------------------------------
-
-
-@dataclass
-class MpnnSequence:
-    """One sequence from a ProteinMPNN run.
-
-    ProteinMPNN reports its own scores in the FASTA headers, so they are read
-    rather than recomputed:
-
-      score         mean negative log-likelihood over DESIGNED positions
-      global_score  same over all positions, designed and fixed
-      seq_recovery  identity to the input sequence
-
-    Lower score is better -- it is a negative log-likelihood, not a similarity.
-    A filter written as `score > x` would select the worst sequences.
-    """
-
-    design_id: str
-    sample: int
-    sequence: str
-    chains: list[str]
-    score: float = float("nan")
-    global_score: float = float("nan")
-    seq_recovery: float = float("nan")
-    temperature: float = float("nan")
-    is_native: bool = False
-
-    @property
-    def sequence_id(self) -> str:
-        return f"{self.design_id}_seq{self.sample:03d}"
-
-    def chain(self, index: int) -> str:
-        """One chain's sequence. ProteinMPNN joins chains with '/'."""
-        if index >= len(self.chains):
-            raise ParseError(
-                f"{self.sequence_id} has {len(self.chains)} chain(s), index {index} requested"
-            )
-        return self.chains[index]
-
-    def as_row(self) -> dict:
-        return {
-            "design_id": self.design_id,
-            "sequence_id": self.sequence_id,
-            "sequence": self.sequence,
-            "length": len(self.sequence.replace("/", "")),
-            "mpnn_score": self.score,
-            "mpnn_global_score": self.global_score,
-            "mpnn_seq_recovery": self.seq_recovery,
-            "mpnn_temperature": self.temperature,
-        }
-
-
-def _parse_mpnn_header(header: str) -> dict:
-    """Pull key=value pairs out of a ProteinMPNN FASTA header.
-
-    Headers look like:
-      >design, score=1.1066, global_score=1.1066, fixed_chains=['B'], ...
-      >T=0.1, sample=1, score=0.7073, global_score=0.9001, seq_recovery=0.5170
-
-    Bracketed list values are kept as raw strings; only the numeric fields are
-    coerced, and a field that will not parse is omitted rather than guessed at.
-    """
-    fields: dict = {}
-    depth = 0
-    token = ""
-    for ch in header:
-        if ch in "[(":
-            depth += 1
-        elif ch in "])":
-            depth -= 1
-        if ch == "," and depth == 0:
-            fields.update(_mpnn_token(token))
-            token = ""
-        else:
-            token += ch
-    fields.update(_mpnn_token(token))
-    return fields
-
-
-def _mpnn_token(token: str) -> dict:
-    token = token.strip()
-    if "=" not in token:
-        return {"_name": token} if token else {}
-    key, _, value = token.partition("=")
-    key, value = key.strip(), value.strip()
-    try:
-        return {key: float(value)}
-    except ValueError:
-        return {key: value}
-
-
-def parse_proteinmpnn_fasta(
-    path: str | Path, design_id: str, binder_chain_index: int = 0
-) -> tuple[MpnnSequence | None, list[MpnnSequence]]:
-    """Read a ProteinMPNN output FASTA.
-
-    Returns (native, samples). The first record is the input sequence, echoed
-    back with its own score; the rest are the sampled designs. The native is
-    returned separately so it cannot be mistaken for a design and carried into
-    Step 3.
-    """
-    path = Path(path)
-    try:
-        text = path.read_text()
-    except OSError as exc:
-        raise ParseError(f"cannot read {path}: {exc}") from exc
-
-    records: list[tuple[str, str]] = []
-    header: str | None = None
-    seq_parts: list[str] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(">"):
-            if header is not None:
-                records.append((header, "".join(seq_parts)))
-            header, seq_parts = line[1:], []
-        else:
-            seq_parts.append(line)
-    if header is not None:
-        records.append((header, "".join(seq_parts)))
-
-    if not records:
-        raise ParseError(f"no FASTA records in {path}")
-
-    native: MpnnSequence | None = None
-    samples: list[MpnnSequence] = []
-    for position, (head, sequence) in enumerate(records):
-        fields = _parse_mpnn_header(head)
-        chains = sequence.split("/")
-        entry = MpnnSequence(
-            design_id=design_id,
-            sample=int(fields.get("sample", 0)),
-            sequence=sequence,
-            chains=chains,
-            score=float(fields.get("score", float("nan"))),
-            global_score=float(fields.get("global_score", float("nan"))),
-            seq_recovery=float(fields.get("seq_recovery", float("nan"))),
-            temperature=float(fields.get("T", float("nan"))),
-            is_native=position == 0 and "sample" not in fields,
-        )
-        if entry.is_native:
-            native = entry
-        else:
-            samples.append(entry)
-
-    if not samples:
-        raise ParseError(
-            f"{path} holds only the native sequence; ProteinMPNN produced no samples"
-        )
-    return native, samples
-
-
-def binder_fasta(
-    samples: list[MpnnSequence], out_path: str | Path, binder_chain_index: int = 0
-) -> Path:
-    """Write just the binder chain of each sample, for Step 3 monomer folding.
-
-    Step 3 validates the binder in isolation, so the target chain must be
-    dropped here. Passing the full multi-chain string to ESMFold would fold the
-    complex as one concatenated sequence and every scRMSD downstream would be
-    meaningless.
-    """
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as fh:
-        for sample in samples:
-            fh.write(f">{sample.sequence_id}\n{sample.chain(binder_chain_index)}\n")
-    return out_path
