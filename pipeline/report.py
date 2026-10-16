@@ -92,6 +92,11 @@ class Campaign:
                     "plddt", "scrmsd", "iptm", "pae_interaction", "binder_rmsd_to_design"
                 )
             }
+            # ProteinMPNN's score is not engine-prefixed -- MpnnSequence.as_row
+            # writes the literal column `mpnn_score` -- so it is read directly
+            # and is simply absent (hence skipped by metrics.passes) for any
+            # gate block that does not set mpnn_score_max.
+            candidate["mpnn_score"] = row.get("mpnn_score")
             # binder_rmsd is written with a shorter column name by ComplexRecord.
             if candidate["binder_rmsd_to_design"] is None:
                 candidate["binder_rmsd_to_design"] = row.get(f"{metric_prefix}_binder_rmsd")
@@ -178,12 +183,7 @@ class Campaign:
 def funnel_projection(
     backbones: int, seqs_per_backbone: int, pass_rates: list[tuple[str, float]]
 ) -> pd.DataFrame:
-    """Expected survivors per stage, before spending any GPU time.
-
-    Worth running before a campaign: the MANIFEST's prototype numbers
-    (10-15 backbones, 2-3 seqs, ~17% then ~7%) project to well under one lead,
-    which is a scale problem rather than a design problem.
-    """
+    """Expected survivors per stage, before spending any GPU time."""
     remaining = float(backbones * seqs_per_backbone)
     rows = [{"stage": "sequences", "expected": round(remaining, 2), "pass_rate": None}]
     for name, rate in pass_rates:
