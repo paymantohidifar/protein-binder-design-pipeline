@@ -18,6 +18,11 @@ pae_interaction
     target->binder, averaged together. Not the full-matrix mean, which is
     dominated by the intra-chain blocks and would make a bad complex look good.
 
+mpnn_score
+    ProteinMPNN's own per-sequence mean negative log-likelihood over designed
+    positions, read from its FASTA header rather than recomputed. Lower is
+    better; the Step 2 gate and the `mpnn_tier` ladder are both upper bounds.
+
 plddt_mean
     Mean pLDDT over binder residues only, on a 0-100 scale. Predictors differ:
     ESMFold reports 0-1, ColabFold 0-100. Normalised on ingest.
@@ -160,6 +165,37 @@ def plddt_mean(values: np.ndarray | list[float], idx: np.ndarray | list[int] | N
     return float(arr.mean())
 
 
+def mpnn_tier(score: float, thresholds: dict) -> str:
+    """Quality tier for a ProteinMPNN sequence score.
+
+    `score` is a mean negative log-likelihood, so lower is better and every
+    bound in `thresholds` is an upper bound. Returns one of:
+
+      preferred   <= mpnn_score_preferred_max
+      acceptable  <= mpnn_score_max           (the gate; advances to Step 3)
+      marginal    <= mpnn_score_marginal_max
+      fail        above that
+      unknown     score is NaN/absent -- a parse failure, not a bad sequence
+
+    Only the `acceptable` boundary gates (see `passes`); the others are labels,
+    so a campaign can report its preferred fraction without changing the funnel.
+    Missing bounds collapse the tiers above them rather than defaulting to a
+    number: thresholds live in config/campaign.yaml, never here.
+    """
+    if score is None or (isinstance(score, float) and np.isnan(score)):
+        return "unknown"
+    score = float(score)
+    ladder = [
+        ("preferred", "mpnn_score_preferred_max"),
+        ("acceptable", "mpnn_score_max"),
+        ("marginal", "mpnn_score_marginal_max"),
+    ]
+    for tier, key in ladder:
+        if key in thresholds and score <= thresholds[key]:
+            return tier
+    return "fail"
+
+
 def passes(record: dict, thresholds: dict) -> tuple[bool, list[str]]:
     """Evaluate a candidate against a gate block from config/campaign.yaml.
 
@@ -168,6 +204,8 @@ def passes(record: dict, thresholds: dict) -> tuple[bool, list[str]]:
     scale a NaN means a broken parser, not a bad design.
     """
     checks = [
+        # mpnn_score is a negative log-likelihood: lower is better, hence <=.
+        ("mpnn_score", "mpnn_score_max", lambda v, t: v <= t, "<="),
         ("plddt", "plddt_min", lambda v, t: v >= t, ">="),
         ("scrmsd", "scrmsd_max", lambda v, t: v <= t, "<="),
         ("iptm", "iptm_min", lambda v, t: v >= t, ">="),
