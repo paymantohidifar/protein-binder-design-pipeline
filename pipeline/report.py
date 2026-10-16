@@ -92,12 +92,7 @@ class Campaign:
                     "plddt", "scrmsd", "iptm", "pae_interaction", "binder_rmsd_to_design"
                 )
             }
-            # ProteinMPNN's score is not engine-prefixed -- MpnnSequence.as_row
-            # writes the literal column `mpnn_score` -- so it is read directly
-            # and is simply absent (hence skipped by metrics.passes) for any
-            # gate block that does not set mpnn_score_max.
             candidate["mpnn_score"] = row.get("mpnn_score")
-            # binder_rmsd is written with a shorter column name by ComplexRecord.
             if candidate["binder_rmsd_to_design"] is None:
                 candidate["binder_rmsd_to_design"] = row.get(f"{metric_prefix}_binder_rmsd")
 
