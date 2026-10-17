@@ -377,6 +377,8 @@ def verify_design_hotspots(
             "binder_chain": binder_chain,
             "target_chain": target_chain,
             "chain_roles": roles.detail,
+            "binder_len": roles.binder_idx0.size,
+            "is_binder_design": roles.is_binder_design        
         }
     )
     return result
