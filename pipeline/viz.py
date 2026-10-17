@@ -119,7 +119,18 @@ def _superpose_onto_design(
         )
 
     _, rotation, translation = metrics.kabsch_rmsd(mobile, fixed)
-    moved = pdb_io.Chain(
+    return _as_pdb_text(_transform_chain(chain, rotation, translation))
+
+
+def _transform_chain(chain, rotation: np.ndarray, translation: np.ndarray):
+    """Copy of `chain` with every atom moved into the target frame.
+
+    All atoms, not just the ones that drove the fit, and B-factors are carried
+    over -- they hold pLDDT, which the interface view colours by.
+    """
+    from . import metrics
+
+    return pdb_io.Chain(
         chain_id=chain.chain_id,
         residues=[
             pdb_io.Residue(
@@ -136,8 +147,10 @@ def _superpose_onto_design(
         ],
     )
 
+
+def _as_pdb_text(*chains) -> str:
     with tempfile.TemporaryDirectory() as tmp:
-        out = pdb_io.write_pdb([moved], Path(tmp) / "aligned_target.pdb")
+        out = pdb_io.write_pdb(list(chains), Path(tmp) / "superposed.pdb")
         return out.read_text()
 
 
@@ -224,31 +237,89 @@ def show_backbone_ensemble(
 # --- Checkpoint 3: monomer self-consistency --------------------------------
 
 
+def _superpose_prediction(
+    predicted_pdb: str | Path,
+    design_pdb: str | Path,
+    design_binder_chain: str = "A",
+    predicted_chain: str | None = None,
+) -> str:
+    """Predicted monomer PDB text, rotated onto the design's binder chain.
+
+    Fitted on the same paired backbone atoms `metrics.scrmsd` uses -- positional
+    pairing, since a prediction is numbered from 1 while the design pose keeps
+    its own numbering -- so the residual left on screen IS the reported scRMSD.
+    """
+    from . import metrics
+
+    structure = pdb_io.read_pdb(predicted_pdb)
+    predicted = (structure[predicted_chain] if predicted_chain
+                 else structure.only_chain() if len(structure.chains) == 1
+                 else structure[structure.chain_ids[0]])
+    design = pdb_io.read_pdb(design_pdb)[design_binder_chain]
+
+    _, rotation, translation = metrics.backbone_superposition(predicted, design)
+    return _as_pdb_text(_transform_chain(predicted, rotation, translation))
+
+
 def show_monomer_superposition(
     design_pdb: str | Path,
     predicted_pdb: str | Path,
     scrmsd: float | None = None,
+    binder_chain: str = "A",
+    predicted_chain: str | None = None,
+    align: bool = True,
     width: int = 800,
     height: int = 520,
 ):
-    """Design pose (cyan) against predicted monomer (magenta).
+    """Design pose (cyan) against predicted monomer (magenta), superposed.
 
-    Both are drawn in their own frames: py3Dmol does not superpose, and
-    pre-superposing here would hide exactly the disagreement scRMSD measures.
-    The caption carries the number.
+    The prediction is moved onto the design's binder chain before rendering.
+    py3Dmol does not superpose, and the two files are in unrelated frames --
+    RFdiffusion recentres its output while a predictor emits its own arbitrary
+    frame -- so drawn as loaded they sit apart by whatever that offset happens
+    to be and nothing about the fold can be read off the view.
+
+    Superposing hides nothing: scRMSD is itself defined after optimal
+    superposition, so the separation left on screen is the deviation the gate
+    measures, residue by residue. The rigid-body offset it replaces is not a
+    design observable at all.
+
+    `binder_chain` is the binder INSIDE the design PDB, which also carries the
+    target; only that chain is drawn, since this checkpoint is about the monomer.
+    Pass `align=False` for the raw frames.
     """
     view = _view(width, height)
     view.addModel(_read(design_pdb), "pdb")
-    view.setStyle({"model": 0}, {"cartoon": {"color": DESIGN_COLOUR}})
-    view.addModel(_read(predicted_pdb), "pdb")
+    # The design file holds the target too. Drawing it would dominate zoomTo
+    # and bury the 87-residue binder next to a 150-residue target.
+    view.setStyle({"model": 0}, {})
+    view.setStyle({"model": 0, "chain": binder_chain},
+                  {"cartoon": {"color": DESIGN_COLOUR}})
+
+    caption = "design=cyan  predicted=magenta"
+    predicted_text = _read(predicted_pdb)
+    if align:
+        try:
+            predicted_text = _superpose_prediction(
+                predicted_pdb, design_pdb, binder_chain, predicted_chain
+            )
+        except (ValueError, KeyError) as exc:
+            # Loud, and said on the view as well: an unaligned pair reads as a
+            # catastrophic prediction rather than as a failed fit.
+            print(f"  note: could not superpose, view is UNALIGNED -- {exc}")
+            caption = f"UNALIGNED (fit failed)   {caption}"
+
+    view.addModel(predicted_text, "pdb")
     view.setStyle({"model": 1}, {"cartoon": {"color": PREDICTION_COLOUR}})
+
     if scrmsd is not None:
-        view.addLabel(
-            f"scRMSD {scrmsd:.2f} A   design=cyan  predicted=magenta",
-            {"fontSize": 12, "backgroundColor": "black", "backgroundOpacity": 0.6,
-             "position": {"x": 0, "y": 0, "z": 0}},
-        )
-    view.zoomTo()
+        caption = f"scRMSD {scrmsd:.2f} A   {caption}"
+    view.addLabel(
+        caption,
+        {"fontSize": 12, "backgroundColor": "black", "backgroundOpacity": 0.6,
+         "useScreen": True, "screenOffset": {"x": 10, "y": 10}},
+    )
+    view.zoomTo({"model": 1})
     return view
 
 
@@ -319,9 +390,13 @@ def write_pml_superposition(
     design_pdb: str | Path,
     predicted_pdb: str | Path,
     out_path: str | Path,
-    binder_chain: str = "B",
+    binder_chain: str = "A",
 ) -> Path:
     """PyMOL scene for the monomer self-consistency checkpoint.
+
+    `binder_chain` is the binder inside the DESIGN pdb, chain A per the .trb
+    classification -- not the Step 4 complex layout `show_complex_interface`
+    takes.
 
     Uses `align` so PyMOL reports its own RMSD in the log. That number is an
     independent check on pipeline.metrics -- it will differ slightly, because
