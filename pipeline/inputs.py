@@ -1,47 +1,6 @@
-"""Build the input files each tool expects (Step 4 complex prediction).
+"""Build the input files each tool expects.
 
 Separate from parsers.py: that reads tool output, this writes tool input.
-
-BOLTZ-2 USES YAML, NOT FASTA. Upstream `docs/prediction.md` states: *"YAML is
-preferred; FASTA is deprecated"* and *"FASTA format is still supported but is
-deprecated and only supports a limited subset of features compared to YAML."*
-FASTA cannot express modified residues, covalent bonds, pocket conditioning, or
-affinity. None of those are used today, but the campaign should not sit on a
-deprecated path, and pocket conditioning is a decision we may want later (see
-`write_boltz_complex_yamls`).
-
-The schema, one file per prediction:
-
-    version: 1
-    sequences:
-      - protein:
-          id: A
-          sequence: <binder>
-          msa: empty
-      - protein:
-          id: B
-          sequence: <target>
-          msa: empty
-
-Three rules survive the format change, each of which fails differently when
-broken:
-
-1. **`msa` must be the literal `empty` for single-sequence mode.** Upstream:
-   *"To force single-sequence mode (not recommended, as it reduces accuracy),
-   set `msa: empty`."* Omitting the key means `msa=0`, i.e. *auto-generate*,
-   and boltz then raises `Missing MSA's in input and --use_msa_server flag not
-   set.` (main.py:582). `empty` maps to -1 (schema.py:1127) -- the
-   database-free path this campaign requires by default.
-2. **One file per prediction.** Every entry under `sequences:` becomes a CHAIN
-   of ONE target, and the job name is the file stem. A file holding ten
-   candidates is a ten-chain complex, not ten monomers -- a wrong answer with
-   no error. This was an observed defect, originally via FASTA.
-3. **`version: 1` is required** by `parse_boltz_schema`.
-
-ColabFold is unaffected and still takes a single FASTA record with chains
-joined by ':'. The two engines have never shared an input file and must not:
-ColabFold reading a Boltz input would see one concatenated monomer and predict
-the wrong thing confidently.
 """
 
 from __future__ import annotations
@@ -177,23 +136,6 @@ def write_boltz_complex_yamls(
     Chain order is binder-first to match what ColabFold receives, so both Step
     4 engines share one chain convention -- which is NOT the design PDB's
     layout, and is why `parsers` is passed chain ids explicitly.
-
-    POCKET CONDITIONING IS DELIBERATELY NOT USED, although YAML is the only
-    format that offers it:
-
-        constraints:
-          - pocket:
-              binder: A
-              contacts: [[B, 146], [B, 170], [B, 178]]
-              max_distance: 6
-
-    Our hotspots are known, so this is tempting. It would be a mistake here.
-    Step 4 exists to ask *independently* whether the binder docks at the
-    epitope it was designed against; conditioning the validator on that answer
-    turns the check into a restatement of the design intent and would inflate
-    pass rates. It would also make the two Step 4 engines non-comparable, since
-    ColabFold has no equivalent -- and the engine comparison is the whole
-    reason both run. Worth revisiting only as a separate, labelled experiment.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
