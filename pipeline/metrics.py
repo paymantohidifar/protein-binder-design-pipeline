@@ -78,10 +78,22 @@ def _paired_backbone(a: Chain, b: Chain) -> tuple[np.ndarray, np.ndarray, int]:
     return coords_a, coords_b, len(keys_a)
 
 
+def backbone_superposition(
+    predicted: Chain, design: Chain
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """scRMSD together with the transform that produced it.
+
+    Exists so a renderer can move a prediction onto its design through the same
+    pairing and fit the gate uses, making the separation left on screen the
+    number in the table rather than a second, differently-fitted answer.
+    """
+    pred, des, _ = _paired_backbone(predicted, design)
+    return kabsch_rmsd(pred.reshape(-1, 3), des.reshape(-1, 3))
+
+
 def scrmsd(predicted: Chain, design: Chain) -> float:
     """Binder backbone self-consistency RMSD, binder superposed on itself."""
-    pred, des, _ = _paired_backbone(predicted, design)
-    rmsd, _, _ = kabsch_rmsd(pred.reshape(-1, 3), des.reshape(-1, 3))
+    rmsd, _, _ = backbone_superposition(predicted, design)
     return rmsd
 
 
