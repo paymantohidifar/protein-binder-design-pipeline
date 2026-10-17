@@ -25,7 +25,7 @@ rfdiffusion:
     smoke: true
     full: false
   verify_hotspot_contacts: true
-  hotspot_contact_distance: 10.0 # Cβ–Cβ distance threshold (Å)
+  # hotspot_contact_distance: 10.0 # Cβ–Cβ distance threshold (Å)
   min_hotspots_engaged: 3        # Require all hotspots engaged. Drop to 2 to allow partial engagement.
 
 proteinmpnn:
@@ -41,31 +41,17 @@ proteinmpnn:
   fixed_chains: [B]
 
 boltz2:
-  #   single_sequence  writes `msa: empty`; fully local, no network, the
-  #                    default. This is the only genuinely database-free path.
-  #   msa_server       omits the key and adds --use_msa_server, which sends
-  #                    EVERY binder and target sequence to the public MMseqs2
-  #                    API. More accurate, slower, rate-limited, and it takes
-  #                    unpublished designs off-host -- opt in deliberately.
-  msa_mode: msa_server
+  msa_mode: msa_server # Change it single_sequence to avoid MSA
+  msa_server_url: https://api.colabfold.com
 
 complex_validation:
   engines: [boltz2, colabfold] # Both engines run so their outputs can be compared.
   colabfold_msa_mode: mmseqs2_api
   colabfold_model_type: alphafold2_multimer_v3
   # Run colabfold_batch twice, as upstream's README recommends: once with
-  # --msa-only to fetch MSAs, then again to predict. Three reasons it is worth
-  # it here, beyond upstream's GPU-utilisation argument:
-  #   1. The MSA pass is network-bound on a RATE-LIMITED public API. The GPU
-  #      would otherwise idle while queueing -- costly at Phase B scale.
-  #   2. The MSA pass needs no GPU and no AF2 weights (--msa-only sets
-  #      num_models=0, which skips download_alphafold_params), so it runs with
-  #      gpus=False and does not hold an A100 to wait on HTTP.
-  # Both passes MUST share one out_dir: the MSA cache is <out_dir>/<job>.pickle.
-  # Set false to run the single combined invocation.
+  # --msa-only to fetch MSAs, then again to predict.
   colabfold_two_step: true
   
-# Note: Thresholds roughly match Bennett et al. 2023. 
 gates:
   step2_proteinmpnn:
     mpnn_score_max: 1.25
@@ -101,8 +87,6 @@ paths:
   boltz2_monomer: results/03b_boltz2
   complexes: results/04_complexes
   summary: results/final_leads_summary.csv
-  # Container transcripts and the campaign timeline. One file per docker run
-  # plus pipeline.log; override per-instance with $BINDER_LOG_DIR.
   logs: results/logs
 
 # --- Containers --------------------------------------------------------------
