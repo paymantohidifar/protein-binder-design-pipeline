@@ -52,6 +52,39 @@ BOLTZ_INPUT_SUFFIXES = (".yaml", ".yml", ".fasta", ".fa", ".fas")
 # path to a custom .a3m/.csv alignment.
 MSA_SINGLE_SEQUENCE = "empty"
 
+# The regimes `boltz2.msa_mode` in config/campaign.yaml selects.
+MSA_MODES = ("single_sequence", "msa_server")
+
+
+def msa_spec(mode: str) -> str | None:
+    """YAML `msa` value for a campaign MSA mode; a path passes through.
+
+    Pair with `use_msa_server`: the YAML key and the container flag must agree
+    and a mismatch does not error. `msa: empty` plus the flag runs
+    single-sequence anyway, logging only "Found explicit empty MSA".
+    """
+    if mode == "single_sequence":
+        return MSA_SINGLE_SEQUENCE
+    if mode == "msa_server":
+        return None
+    if not mode or mode.lower() in {"none", "null", "empty"}:
+        # `empty` as a MODE reads as single-sequence here but may have meant
+        # "unset"; refuse rather than pick a regime.
+        raise ValueError(
+            f"ambiguous boltz2 msa_mode {mode!r}; use one of {MSA_MODES} "
+            "or a path to a precomputed alignment"
+        )
+    return mode
+
+
+def use_msa_server(mode: str) -> bool:
+    """Whether `boltz predict` needs --use_msa_server for this mode.
+
+    A precomputed-alignment path is read from disk, so it must NOT carry the
+    flag -- that would queue a public API lookup the run does not need.
+    """
+    return msa_spec(mode) is None
+
 
 def _boltz_yaml(chains: list[tuple[str, str]], msa: str | None) -> str:
     """Render one Boltz-2 input document.
