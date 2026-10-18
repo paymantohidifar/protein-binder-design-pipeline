@@ -55,9 +55,6 @@ fi
 # -----------------------------------------------------------------------------
 # Build Phase
 # -----------------------------------------------------------------------------
-# NOTE: Do NOT add --gpus here. OpenFold's setup.py (ESMFold) checks for libcuda.so
-# at compile time. If present, it targets the host's specific GPU architecture 
-# instead of compiling portable architecture binaries.
 built_images=()
 
 for name in "${TARGETS[@]}"; do
@@ -75,7 +72,7 @@ log_info "Successfully built: ${built_images[*]}"
 # GPU Compatibility Probes
 # -----------------------------------------------------------------------------
 # Every pipeline image can fail on specific GPU architectures without throwing a
-# startup error:
+# startup error.
 #   - PyTorch images : Mismatched CUDA arch raises only when a tensor reaches the GPU 
 #                      ("no kernel image is available"), minutes into a design run.
 #   - ColabFold      : JAX silently falls back to CPU (~100x slowdown without errors).
@@ -83,27 +80,11 @@ log_info "Successfully built: ${built_images[*]}"
 #                      guarantee OpenFold custom C++/CUDA extension compatibility.
 # -----------------------------------------------------------------------------
 
-# The shared cache, resolved exactly as pipeline/docker.py::cache_dir() does, so
-# probes see the same mount the campaign will. Created here as the invoking user:
-# letting `docker run -v` create a missing path would make it root-owned, which
-# is the hazard the --user mapping exists to avoid.
+# The shared cache
 readonly BINDER_CACHE="${BINDER_CACHE:-$HOME/.cache/binder-pipeline}"
 mkdir -p "$BINDER_CACHE"
 
-# A probe MUST run the way the campaign runs, which means unprivileged and with
-# /cache mounted. This is not cosmetic -- it is the difference between catching
-# a defect here and catching it on a GPU-billed instance.
-#
-# Two of the four Boltz-2 defects were invisible to the previous version of this
-# function, which ran as ROOT with NO cache mount:
-#
-#   numba          'no locator available' -- root can write into
-#                  site-packages/__pycache__, uid 1000 cannot
-#   cuEquivariance PermissionError: '/.cache' -- root can create /.cache,
-#                  uid 1000 cannot
-#
-# Both passed every probe and then failed on the first real prediction. Running
-# as root tests a configuration that never ships.
+# A probe MUST run the way the campaign runs
 probe() {
     local name="$1" ep="$2" label="$3"; shift 3
     # Skip probe if target wasn't selected in this run
@@ -147,31 +128,6 @@ probe boltz2 python "Checking Boltz-2 CUDA/GPU compatibility" -c "$TORCH_PROBE" 
        PyTorch 2.6/cu126 covers sm_80-sm_90; check NVIDIA host driver or nvidia-container-toolkit setup."
 
 # --- 3b. Boltz-2 Probe (cuEquivariance Kernel Layer) ---
-# This is the ONLY place the kernels can be verified. libcue_ops.so links
-# against libcuda.so.1 (the driver stub), absent during `docker build`, so the
-# Dockerfile's own check is non-fatal by necessity. Two distinct failures have
-# reached a GPU-billed run here:
-#   1. undefined symbol: cublasGemmGroupedBatchedEx -- cuBLAS < 12.5 in the
-#      base image, while cuequivariance-ops-cu12 declares >= 12.5.
-#   2. the import succeeding but the kernel erroring on first forward pass.
-# So the probe loads the ops package AND calls the kernel on a real tensor.
-# Separates "cannot load" from "loads but cannot execute", the same split the
-# OpenFold probe makes.
-#
-# THE WEIGHTS ARE LOAD-BEARING. An earlier version left them at their Optional
-# None defaults, as the upstream docstring example does, and PASSED on an image
-# that then died mid-prediction with "Failed to find C compiler". With no
-# norm weights the fused layer-norm path is skipped, so no triton kernel is
-# ever launched, so triton never JIT-compiles its `cuda_utils` extension and
-# never needs a compiler. Passing real weights -- exactly the set
-# boltz/model/layers/triangular_mult.py:23 passes -- is what exercises
-# fused_layer_norm_torch -> triton jit -> driver init.
-#
-# Shapes come from boltz's own module definition (triangular_mult.py:53-59):
-# norm_* are LayerNorm(dim) so (dim,); p_in/g_in are Linear(dim, 2*dim) so
-# (2*dim, dim); p_out/g_out are Linear(dim, dim). dim must be a multiple of 32
-# (documented limitation); 128 is boltz's default. x is (batch, seq, seq, dim)
-# float32 and mask is (batch, seq, seq) FLOAT -- 1 = valid, not bool.
 readonly CUEQ_PROBE='
 import sys, torch
 try:
@@ -215,8 +171,6 @@ probe esmfold python "Checking ESMFold PyTorch/GPU compatibility" -c "$TORCH_PRO
 || log_fatal "ESMFold image cannot run on this GPU at the PyTorch level."
 
 # --- 5. ESMFold Probe (OpenFold C++/CUDA Extension Layer) ---
-# OpenFold's setup.py compiles explicitly for {sm_37, sm_52, sm_61, sm_70, sm_80} without PTX.
-# While PyTorch 2.1/cu118 supports sm_90+, OpenFold cubin binaries fail on sm_90 (H100/B200).
 readonly OPENFOLD_PROBE='
 import re, subprocess, sys, torch
 try:
@@ -270,4 +224,3 @@ probe colabfold python "Checking ColabFold JAX/GPU compatibility" -c "$COLABFOLD
 fi
 
 log_info "All targeted image builds and capability probes verified successfully."
-log_info "Next step: bash scripts/bootstrap_instance.sh --weights-only"
