@@ -11,7 +11,6 @@ name = "binder-design-pipeline"
 version = "0.1.0"
 description = "Database-free de novo protein-binder design funnel"
 authors = ["Payman Tohidifar"]
-email = ["payman.tohidifar@gmail.com"]
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 
