@@ -31,6 +31,7 @@ if ! groups | grep -qw docker; then
         log "Adding $USER to the 'docker' group..."
         sudo usermod -aG docker "$USER"
         ok "Added $USER to the 'docker' group."
+        newgrp docker
     fi
 
     log "Re-executing script with active 'docker' group privileges..."
@@ -39,3 +40,4 @@ fi
 
 ok "Docker environment verified and active."
 warn "Run 'newgrp docker' in your interactive terminal to apply the group changes."
+warn "Run 'docker images' to verify user permissions."
