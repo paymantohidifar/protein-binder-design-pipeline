@@ -116,29 +116,6 @@ done
 # ==============================================================================
 log "NVIDIA container toolkit"
 
-# if ! command -v docker >/dev/null 2>&1; then
-#     if [[ "$MODE" == "check" ]]; then
-#         note_fail "Docker is not installed."
-#     else
-#         log "Installing Docker"
-#         curl -fsSL https://get.docker.com | sudo sh
-#         # sudo usermod -aG docker "$USER"
-#         # warn "Added $USER to the docker group. Log out and back in, then re-run this script."
-#     fi
-# else
-#     ok "Docker $(docker --version | awk '{print $3}' | tr -d ,)"
-# fi
-
-# # If the current process lacks active docker group privileges, add user and re-exec.
-# if ! groups | grep -qw docker; then
-#     if ! id -nG "$USER" | grep -qw docker; then
-#         sudo usermod -aG docker "$USER"
-#         # warn "ACTION REQUIRED: Added $USER to the 'docker' group."
-#         # warn "Please log out, restart your terminal, and re-run this script to continue."
-#         # exit 0
-#     fi
-# fi
-
 # Test container GPU passthrough capabilities
 if docker run --rm --gpus all ubuntu:22.04 true 2>/dev/null; then
     ok "GPU passthrough functional."
@@ -191,7 +168,7 @@ if command -v pixi >/dev/null 2>&1; then
     ok "Pixi $(pixi --version | awk '{print $2}')"
     PIXI_READY=true
 elif [[ "$MODE" == "check" ]]; then
-    warn "Pixi is not installed (full bootstrap mode will install it)."
+    note_fail "Pixi is not installed (full bootstrap mode will install it)."
 else
     log "Installing Pixi package manager"
     if curl -fsSL https://pixi.sh/install.sh | bash; then
@@ -199,15 +176,12 @@ else
         hash -r
         if command -v pixi >/dev/null 2>&1; then
             ok "Pixi $(pixi --version | awk '{print $2}') installed."
-            warn "run 'source ~/.bashrc' after installation."
             PIXI_READY=true
         else
             warn "Pixi installed but executable not found on PATH ($HOME/.pixi/bin)."
         fi
     else
-        warn "Pixi installation failed. Install it manually:"
-        warn "curl -fsSL https://pixi.sh/install.sh | bash"
-        warn "run 'source ~/.bashrc' after installation."
+        note_fail "Pixi installation failed. Install it manually."
     fi
 fi
 
@@ -230,15 +204,8 @@ if [[ "$PIXI_READY" == true ]]; then
     fi
 fi
 
-# --- 5c. Pip Fallback ---
-if [[ "$PIXI_READY" != true && "$MODE" == "full" ]]; then
-    warn "Pixi unavailable—falling back to pip + requirements.txt (non-version-locked)."
-    python3 -m pip install --user --quiet -r requirements.txt \
-        && ok "requirements.txt installed." \
-        || note_fail "pip install failed."
-fi
 
-# --- 5d. Interpreter Selector Wrapper ---
+# --- 5c. Interpreter Selector Wrapper ---
 host_python() {
     if [[ "$PIXI_READY" == true ]]; then
         pixi run --environment "$PIXI_ENV" python "$@"
@@ -247,7 +214,7 @@ host_python() {
     fi
 }
 
-# --- 5e. Dependency Verification Probe ---
+# --- 5d. Dependency Verification Probe ---
 host_python - <<'PY' || note_fail "Host Python dependencies incomplete."
 import importlib.util
 import sys
@@ -265,36 +232,12 @@ print(f"   ok  Python v{sys.version.split()[0]} | NumPy v{numpy.__version__} | "
 PY
 
 # ==============================================================================
-# 6. RFDIFFUSION WEIGHTS DOWNLOAD
-# ==============================================================================
-# log "RFdiffusion model weights"
-
-# if [[ "$MODE" != "check" ]]; then
-#     for spec in \
-#         "6f5902ac237024bdd0c176cb93063dc4/Base_ckpt.pt" \
-#         "e29311f6f1bf1af907f9ef9f44b8328b/Complex_base_ckpt.pt"
-#     do
-#         target="$BINDER_CACHE/rfdiffusion/models/$(basename "$spec")"
-#         if [[ -s "$target" ]]; then
-#             ok "$(basename "$spec") present."
-#         else
-#             wget -q --show-progress -O "$target" "$RFDIFFUSION_WEIGHTS_URL/$spec" \
-#                 || { rm -f "$target"; note_fail "Failed to download $(basename "$spec")"; }
-#         fi
-#     done
-# else
-#     for f in Base_ckpt.pt Complex_base_ckpt.pt; do
-#         [[ -s "$BINDER_CACHE/rfdiffusion/models/$f" ]] && ok "$f present." || warn "$f missing."
-#     done
-# fi
-
-# ==============================================================================
-# 7. CONTAINER IMAGES
+# 6. CONTAINER IMAGES
 # ==============================================================================
 log "Container images"
 
 if [[ "$DO_IMAGES" == true ]]; then
-    log "Building container images (estimated duration: 30-60 minutes)"
+    log "Building container images (estimated duration: 20-25 minutes)"
     if bash docker/build_all.sh; then
         ok "All container images built successfully."
     else
@@ -313,7 +256,7 @@ for name in "${PIPELINE_IMAGES[@]}"; do
 done
 
 # ==============================================================================
-# 8. MODEL WEIGHT PREFETCH
+# 7. MODEL WEIGHT PREFETCH
 # ==============================================================================
 readonly RFDIFFUSION_WEIGHTS_URL="http://files.ipd.uw.edu/pub/RFdiffusion"
 
@@ -331,22 +274,25 @@ if [[ "$DO_PREFETCH" == true ]]; then
     log "Prefetching model weights"
 
     # --- RFdiffusion ---
-    for spec in \
-        "6f5902ac237024bdd0c176cb93063dc4/Base_ckpt.pt" \
-        "e29311f6f1bf1af907f9ef9f44b8328b/Complex_base_ckpt.pt"
-    do
-        target="$BINDER_CACHE/rfdiffusion/models/$(basename "$spec")"
-        if [[ -s "$target" ]]; then
-            ok "$(basename "$spec") present."
-        else
-            wget -q --show-progress -O "$target" "$RFDIFFUSION_WEIGHTS_URL/$spec" \
-            && ok "RFdiffusion weights cached." \
-            || { rm -f "$target"; note_fail "Failed to download $(basename "$spec")"; }
-        fi
-    done
+    if docker image inspect binder-rfdiffusion:latest >/dev/null 2>&1; then
+        log "RFdiffusion weights"
+        for spec in \
+            "6f5902ac237024bdd0c176cb93063dc4/Base_ckpt.pt" \
+            "e29311f6f1bf1af907f9ef9f44b8328b/Complex_base_ckpt.pt"
+        do
+            target="$BINDER_CACHE/rfdiffusion/models/$(basename "$spec")"
+            if [[ -s "$target" ]]; then
+                ok "$(basename "$spec") present."
+            else
+                wget -q --show-progress -O "$target" "$RFDIFFUSION_WEIGHTS_URL/$spec" \
+                && ok "RFdiffusion weights cached." \
+                || { rm -f "$target"; note_fail "Failed to download $(basename "$spec")"; }
+            fi
+        done
 
     # --- ProteinMPNN ---
     if docker image inspect binder-proteinmpnn:latest >/dev/null 2>&1; then
+        log "ProteinMPNN weights"
         ok "ProteinMPNN weights baked into image."
     else
         warn "Skipping ProteinMPNN prefetch: Image binder-proteinmpnn:latest not built."
@@ -393,16 +339,16 @@ if [[ "$DO_PREFETCH" == true ]]; then
 fi
 
 # ==============================================================================
-# 10. HOST TEST SUITE
+# 8. HOST TEST SUITE
 # ==============================================================================
 log "Host test suite"
 
-if [[ "$MODE" == "full" ]]; then
+if [[ -d "tests/" ]]; then
     host_python -m pytest tests/ -q 2>&1 | tail -n 3
 fi
 
 # ==============================================================================
-# 10. FINAL SUMMARY & VERDICT
+# 9. FINAL SUMMARY & VERDICT
 # ==============================================================================
 log "Summary"
 
@@ -417,7 +363,7 @@ if [[ "$FAILURES" -eq 0 ]]; then
 
     if [[ "$MISSING_IMAGES" -gt 0 ]]; then
         echo "   $MISSING_IMAGES of ${#PIPELINE_IMAGES[@]} images unbuilt."
-        echo "   Next step: bash scripts/bootstrap_instance.sh --all"
+        echo "   Images are missing. Run: bash scripts/bootstrap_instance.sh --all"
     elif [[ "$DO_PREFETCH" != true ]]; then
         echo "   Container images ready. First execution will fetch ~18 GB of weights."
         echo "   Eager prefetch command: bash scripts/bootstrap_instance.sh --prefetch"
@@ -426,10 +372,10 @@ if [[ "$FAILURES" -eq 0 ]]; then
     fi
 
     if [[ "$PIXI_READY" == true ]]; then
-        echo "   Next steps:"
-        echo "   Restart terminal: source ~/.bashrc"
+        echo "   Restart shell: source ~/.bashrc"
         echo "   Register Jupyter kernel for Pixi environment: pixi run register-kernel"
-        echo "   Environment validation: pixi run verify"
+        echo "   Validate Environment: pixi run verify"
+        echo "   Reboot instance to update kernel registry."
         echo "   To use interactive notebook, restart compute instance to update kernel registry."
     else
         echo "   Pixi is not installed. Install it manually."
