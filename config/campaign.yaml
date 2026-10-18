@@ -66,9 +66,9 @@ gates:
     scrmsd_max: 1.5        
     expected_pass_rate: [0.05, 0.10]
   step4_complex:
-    pae_interaction_max: 10.0
-    iptm_min: 0.70
-    binder_rmsd_to_design_max: 2.0
+    pae_interaction_max: 5.0 #10.0
+    iptm_min: 0.80 #0.70
+    # binder_rmsd_to_design_max: 2.0
 
 # --- Controls ----------------------------------------------------------------
 controls:
