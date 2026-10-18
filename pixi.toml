@@ -51,12 +51,4 @@ ci = { features = [], no-default-feature = false }
 register-kernel = "python -m ipykernel install --user --name default --display-name 'Python (Pixi: default)'"
 test = { cmd = "pytest tests/ -q", description = "Run the host test suite" }
 test-verbose = { cmd = "pytest tests/ -v", description = "Test suite, per-test output" }
-notebook-dry-run = { cmd = "python scripts/dry_run_notebook.py", description = "Execute notebook cells with containers stubbed out" }
-verify = { depends-on = ["test", "notebook-dry-run"], description = "Everything checkable without a GPU" }
-lab = { cmd = "jupyter lab notebooks/01_binder_design_prototype.ipynb", description = "Open the prototype notebook" }
-check = { cmd = "bash scripts/bootstrap_instance.sh --check", description = "Report whether this host can run GPU stages" }
-bootstrap = { cmd = "bash scripts/bootstrap_instance.sh", description = "Prepare a fresh GPU instance (installs docker, toolkit, weights)" }
-build-images = { cmd = "bash docker/build_all.sh", description = "Build the five tool containers (~50 GB, GPU host only)" }
-bootstrap-all = { cmd = "bash scripts/bootstrap_instance.sh --all", description = "Full host setup: images + weight prefetch (60-90 min)" }
-prefetch = { cmd = "bash scripts/bootstrap_instance.sh --prefetch", description = "Pull ESMFold/ColabFold weights into the shared cache" }
-weights = { cmd = "bash scripts/bootstrap_instance.sh --weights-only", description = "Fetch RFdiffusion checkpoints into the shared cache" }
+notebook-dry-run = { cmd = "python scripts/dry_run_notebook.py", description = "Execute notebook cells with containers stubbed out" }}
