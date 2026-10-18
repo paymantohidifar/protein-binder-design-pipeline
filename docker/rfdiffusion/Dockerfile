@@ -8,7 +8,8 @@
 # 1. Self-Contained Build: Clones a pinned git commit hash directly to make the
 #    build independent of the host directory context.
 # 2. Hardware Constraints: CUDA 11.6 / PyTorch 1.12 binary stack. Runs on A10/A100
-#    GPUs (`sm_80`/`sm_86`), but CANNOT run on H100+ (`sm_90`).
+#    GPUs (`sm_80`/`sm_86`), but CANNOT run on H100+ (`sm_90`). To support H100+, 
+#    rebuild RFdiffusion against PyTorch 2.x / CUDA 12.
 # 3. Cache & User Permissions: Grants write permissions to the package directory
 #    so runtime schedules can be cached cleanly when running as non-root users.
 # ==============================================================================
