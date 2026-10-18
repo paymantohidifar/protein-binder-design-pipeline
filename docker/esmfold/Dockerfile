@@ -6,9 +6,9 @@
 # PROVENANCE & TECHNICAL NOTES:
 # 1. No upstream Dockerfile exists in facebookresearch/esm. Follows
 #    the official pip install path with [esmfold] dependencies.
-# 2 GPU Architecture: Uses CUDA 11.8 / PyTorch 2.1.0 (has the same H100/sm_90
-#    kernel exclusion as RFdiffusion; works on A10/A100/RTX 3090/4090, but fails on H100+).
-# 3 Weight Caching: ESM-2 3B weights (~10 GB) are NOT baked into this image.
+# 2 GPU Architecture: Uses CUDA 11.8 / PyTorch 2.1.0 (works on 
+# A10/A100/RTX 3090/4090, but fails on H100+).
+# 3 Weight Caching: ESM-2 3B weights (~10 GB) are included into this image.
 #    They download automatically on first run into /cache (redirected via HF_HOME & TORCH_HOME).
 
 # ==============================================================================
@@ -47,8 +47,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ==============================================================================
 # INTERPRETER VERSION GUARD
 # ==============================================================================
-# Fails the build, not the campaign, if the base image's interpreter leaves the
-# window this stack is known to tolerate (3.9 - 3.11).
 RUN python -c "import sys; \
 assert (3, 9) <= sys.version_info[:2] < (3, 12), \
     f'python {sys.version_info[0]}.{sys.version_info[1]} is outside the tested 3.9-3.11 window'; \
@@ -117,7 +115,6 @@ from openfold.utils.feats import atom14_to_atom37; \
 print('ESMFold import chain OK')"
 
 # Separate and non-fatal check: confirms presence of compiled CUDA extension (.so).
-# dlopen may fail without host GPU driver mounted, so host bootstrap script performs authoritative check.
 RUN python -c "import attn_core_inplace_cuda; print('OpenFold CUDA extension present')" \
     || echo "NOTE: OpenFold CUDA extension not loadable at build time (no driver); build_all.sh will verify on host."
 
