@@ -390,7 +390,6 @@ if [[ "$DO_PREFETCH" == true ]]; then
     else
         warn "Skipping Boltz-2 prefetch: Image binder-boltz2:latest not built."
     fi
-    fi
 fi
 
 # ==============================================================================
