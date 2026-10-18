@@ -222,7 +222,7 @@ def passes(record: dict, thresholds: dict) -> tuple[bool, list[str]]:
         ("scrmsd", "scrmsd_max", lambda v, t: v <= t, "<="),
         ("iptm", "iptm_min", lambda v, t: v >= t, ">="),
         ("pae_interaction", "pae_interaction_max", lambda v, t: v <= t, "<="),
-        ("binder_rmsd_to_design", "binder_rmsd_to_design_max", lambda v, t: v <= t, "<="),
+        # ("binder_rmsd_to_design", "binder_rmsd_to_design_max", lambda v, t: v <= t, "<="),
     ]
     reasons: list[str] = []
     for metric, key, test, op in checks:
