@@ -25,7 +25,7 @@ rfdiffusion:
     smoke: true
     full: false
   verify_hotspot_contacts: true
-  # hotspot_contact_distance: 10.0 # Cβ–Cβ distance threshold (Å)
+  hotspot_contact_distance: 10.0 # Cβ–Cβ distance threshold (Å)
   min_hotspots_engaged: 3        # Require all hotspots engaged. Drop to 2 to allow partial engagement.
 
 proteinmpnn:
