@@ -4,6 +4,10 @@ An end-to-end, cloud-native computational platform for designing protein binders
 
 This pipeline orchestrates five state-of-the-art deep learning models across isolated, fully containerized GPU environments. Driven through clean Python wrappers, an interactive Jupyter notebook, and (soon) scalable Snakemake workflows, it aims to deliver a reproducible design funnel from target surface analysis to wet-lab-ready lead candidates.
 
+<p align="center">
+  <img src="assets/lead_binder_complex_2.png" alt="Designed binder in complex with the insulin receptor L1/E1 domain" width="400">
+</p>
+
 ## Key Highlights
 
 * **Fully containerized and reproducible:** every engine (`RFdiffusion`, `ProteinMPNN`, `ESMFold`, `Boltz-2`, `ColabFold`/AlphaFold-Multimer) runs inside its own pinned, self-contained Docker image, so there is no dependency friction between stages.
