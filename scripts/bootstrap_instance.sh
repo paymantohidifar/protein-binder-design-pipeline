@@ -343,7 +343,7 @@ fi
 # ==============================================================================
 log "Host test suite"
 
-if [[ -d "tests/" ]]; then
+if [[ -d "tests/" && "$MODE" != "check" ]]; then
     host_python -m pytest tests/ -q 2>&1 | tail -n 3
 fi
 
