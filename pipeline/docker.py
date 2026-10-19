@@ -45,6 +45,32 @@ class ContainerError(RuntimeError):
         )
 
 
+class RunOutput(str):
+    """A container's combined output -- a `str`, but one that will not print itself.
+
+    `run()` returns the full transcript so a caller can parse it, which makes a
+    bare `docker.run(...)` as a cell's last expression enough to dump every
+    denoising step into the output cell and into the committed `.ipynb`. That
+    is the same clutter `stream=False` exists to prevent, arriving by the other
+    door: Jupyter displaying the return value.
+
+    So `__repr__` is a one-line summary instead of the text. Every string
+    operation -- slicing, `in`, `splitlines`, equality against a plain `str` --
+    behaves exactly as before, and `print(out)` still writes the whole thing
+    when that is what was asked for.
+    """
+
+    #: Set by `run()`. Not a constructor arg: `str.__new__` takes the text, and
+    #: threading a second value through it buys nothing a plain attribute does
+    #: not, while breaking every str method that returns a new instance.
+    transcript: Path | None = None
+
+    def __repr__(self) -> str:
+        lines = self.count("\n") + (1 if self and not self.endswith("\n") else 0)
+        where = f" -> {self.transcript}" if self.transcript else ""
+        return f"<container output: {lines} lines, {len(self)} chars{where}>"
+
+
 def cache_dir() -> Path:
     """Shared host cache for model weights.
 
@@ -144,7 +170,10 @@ def run(
     tail_lines: int = 40,
     label: str | None = None,
 ) -> str:
-    """Execute a container, returning its combined output.
+    """Execute a container, returning its combined output as a `RunOutput`.
+
+    The output is a `str` subclass that reprs as a one-line summary, so a cell
+    ending in `docker.run(...)` shows that summary rather than the transcript.
 
     With dry_run=True the command is printed and not executed -- which is how
     the notebook is validated on a machine with no GPU.
@@ -171,7 +200,7 @@ def run(
         # those catches config drift.
         print(f"[dry-run] {command}")
         log.info(f"[dry-run] {command}")
-        return ""
+        return RunOutput("")
 
     # Lazy: a caller that never configured logging still gets a transcript,
     # under the default directory, rather than silently losing the output.
@@ -208,7 +237,8 @@ def run(
         tail = sink.tail(tail_lines)
         elapsed = sink.elapsed
 
-    output = "".join(lines)
+    output = RunOutput("".join(lines))
+    output.transcript = transcript
 
     # Raise exception if container failed, formatting tail logs
     if returncode != 0:
