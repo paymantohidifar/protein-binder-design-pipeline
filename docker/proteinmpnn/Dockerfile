@@ -29,13 +29,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # ==============================================================================
 # 1. Install git without optional dependencies to clone the codebase
 # 2. Clone the repository and checkout the pinned commit
-# 3. Purge git and apt lists in the same layer to keep the image footprint minimal
+# 3. Drop the apt lists in the same layer to keep the image footprint minimal
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && git clone https://github.com/dauparas/ProteinMPNN.git /opt/ProteinMPNN \
     && cd /opt/ProteinMPNN \
     && git checkout --quiet ${PROTEINMPNN_COMMIT} \
-    && apt-get purge -y git \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
