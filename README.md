@@ -5,7 +5,7 @@ An end-to-end, cloud-native computational platform for designing protein binders
 This pipeline orchestrates five state-of-the-art deep learning models across isolated, fully containerized GPU environments. Driven through clean Python wrappers, an interactive Jupyter notebook, and (soon) scalable Snakemake workflows, it aims to deliver a reproducible design funnel from target surface analysis to wet-lab-ready lead candidates.
 
 <p align="center">
-  <img src="assets/lead_binder_complex_2.png" alt="Designed binder in complex with the insulin receptor L1/E1 domain" width="400">
+  <img src="assets/lead_binder_complex_2.png" alt="Designed binder in complex with the insulin receptor L1/E1 domain" width="300">
 </p>
 
 ## Key Highlights
