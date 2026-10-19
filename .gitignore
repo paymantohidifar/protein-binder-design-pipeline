@@ -15,7 +15,11 @@ results/*
 results/01_backbones/traj/*
 !results/.gitkeep
 
+results_temp/
+
 # MISC
 examples/
 reference/
-docs/
+docs/*
+!docs/CLOUD_SETUP.md
+!docs/BOOTSTRAP.md
