@@ -85,7 +85,7 @@ Once the pre-flight check passes, bootstrap the instance. This installs the [Pix
 bash scripts/bootstrap_instance.sh --all
 ```
 
-> Expect **20–20 minutes**, depending on network bandwidth and disk I/O. The `--images` and `--prefetch` flags run those two halves separately. For advanced options, see [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md), and follow any post-build prompts to finish setup.
+> Expect **20–20 minutes**, depending on network bandwidth and disk I/O. The `--images` and `--prefetch` flags run those two halves separately. Follow any post-build prompts to finish setup.
 
 ### 6. Run the Test Suite
 
